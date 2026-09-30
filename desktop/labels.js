@@ -6,13 +6,17 @@ const STYLES = {
   loc:  {name: "Location label", desc: "Large location code with a barcode. For bins and rack beams.", types: ["code128", "code39", "qrcode", "datamatrix"], def: "code128"},
   rack: {name: "Rack levels", desc: "One label per rack, with a barcode for each level (A, B, C…).", types: ["code128", "code39", "qrcode", "datamatrix"], def: "code128"},
   prod: {name: "Product label", desc: "SKU, description and barcode, plus batch or expiry.", types: ["auto", "ean13", "code128", "code39", "qrcode", "datamatrix"], def: "auto"},
-  qr:   {name: "QR label", desc: "QR or Data Matrix code with text beside it. Good for small bins.", types: ["qrcode", "datamatrix"], def: "qrcode"}
+  qr:   {name: "QR label", desc: "QR or Data Matrix code with text beside it. Good for small bins.", types: ["qrcode", "datamatrix"], def: "qrcode"},
+  beam: {name: "Beam label", desc: "QR code, aisle over bay-level-bin, and an arrow. For rack beams.", types: ["qrcode", "datamatrix"], def: "qrcode", parts: true, layout: ["A4", 2, 10]},
+  upright: {name: "Upright label", desc: "Aisle, bay-level, bin and QR in a grid, with a bay header per rack. For rack uprights.", types: ["qrcode", "datamatrix"], def: "qrcode", parts: true, layout: ["A4", 3, 8]},
+  detail: {name: "Detailed location label", desc: "Aisle, bay, level and bin in large outlined text, with a barcode, QR code and arrow.", types: ["code128", "code39"], def: "code128", parts: true, layout: ["A4", 2, 8]}
 };
+const PARTS = [["zone", "Zone"], ["aisle", "Aisle"], ["bay", "Bay"], ["level", "Level"], ["bin", "Bin"], ["arrow", "Arrow (up/down)"]];
 const TYPES = {auto: "Automatic (EAN-13 when valid, else Code 128)", code128: "Code 128", code39: "Code 39", ean13: "EAN-13", qrcode: "QR Code", datamatrix: "Data Matrix"};
 const TWO_D = new Set(["qrcode", "datamatrix"]);
 const PAPER = {A4: [210, 297], A5: [148, 210]};
 const LAYOUTS = {A4: [[1, 1], [1, 2], [2, 2], [2, 4], [2, 6], [3, 7], [3, 8], [4, 10]], A5: [[1, 1], [1, 2], [2, 2], [2, 3], [2, 4], [3, 4]]};
-const DEF = {style: "loc", type: "code128", paper: "A4", orient: "portrait", cols: 2, rows: 4, margin: 8, gap: 3, copies: 1, start: 1, border: true, arrow: "none", showText: false, textSize: "M", group: "last_char", reverse: false};
+const DEF = {style: "loc", type: "code128", paper: "A4", orient: "portrait", cols: 2, rows: 4, margin: 8, gap: 3, copies: 1, start: 1, border: true, arrow: "none", showText: false, textSize: "M", group: "last_char", reverse: false, mask: "", header: true};
 
 const L = {rows: [], source: "", table: null, map: null, cfg: load()};
 let api;
@@ -51,11 +55,11 @@ let fontOk = null;
 function condFactor() { if (fontOk === null) { try { fontOk = document.fonts && document.fonts.check('700 12px "Barlow Condensed"'); } catch { fontOk = false; } } return fontOk ? .5 : .64; }
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { fontOk = null; if (document.getElementById("lb-preview")) { try { renderStyles(); refresh(); } catch {} } });
 let mctx;
-function textRatio(text) {   // width of the text at font size 1, measured with the font the label actually uses
-  try { mctx = mctx || document.createElement("canvas").getContext("2d"); mctx.font = '700 100px "Barlow Condensed","Arial Narrow",Arial,sans-serif'; return mctx.measureText(String(text)).width / 100; }
+function textRatio(text, face) {   // width of the text at font size 1, measured with the font the label actually uses
+  try { mctx = mctx || document.createElement("canvas").getContext("2d"); mctx.font = "700 100px " + (face || '"Barlow Condensed","Arial Narrow",Arial,sans-serif'); return mctx.measureText(String(text)).width / 100; }
   catch { return String(text).length * condFactor(); }
 }
-function fit(text, w, h) { return Math.max(2, Math.min(h, w * 0.94 / Math.max(textRatio(text), 0.3))); }
+function fit(text, w, h, face) { return Math.max(2, Math.min(h, w * 0.94 / Math.max(textRatio(text, face), 0.3))); }
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const ARROW = {up: "M12 3l8 9h-5v9H9v-9H4z", down: "M12 21l8-9h-5V3H9v9H4z"};
 const arrowSvg = dir => `<svg viewBox="0 0 24 24" class="lb-arrow"><path d="${ARROW[dir]}" fill="#000"/></svg>`;
@@ -66,6 +70,28 @@ function codeBox(type, text, w, h, warn) {
   const s = TWO_D.has(type) ? Math.min(w, h) : 0;
   return `<div class="lb-code" style="width:${s || w}mm;height:${s || h}mm">${b.svg}</div>`;
 }
+function splitParts(code, mask) {
+  if (!mask) return null;
+  const K = {Z: "zone", A: "aisle", B: "bay", L: "level", P: "bin"}, out = {zone: "", aisle: "", bay: "", level: "", bin: ""}, t = String(code);
+  if (t.length !== mask.length) return null;
+  for (let i = 0; i < mask.length; i++) { const k = K[mask[i].toUpperCase()]; if (k) out[k] += t[i]; }
+  return out;
+}
+function suggestMask(codes) {
+  const s = codes.slice(0, 200);
+  if (s.length && s.every(x => /^[A-Z0-9]{4}[A-Z]\d{4}[A-Z]$/i.test(x))) return "ZZZZABBLLP";                // W2C2M0103B
+  if (s.length && s.every(x => /^[A-Z]\d?-?\d{2}-\d{2}-[A-Z]$/i.test(x))) { const x = s[0]; return x.replace(/^([A-Z]\d?)(-?)(\d{2})-(\d{2})-([A-Z])$/i, (m, a, d, b, l, p) => "A".repeat(a.length) + d + "BB-LL-P"); }
+  if (s.length && s.every(x => /^[A-Z]{1,2}\d{2,3}-[A-Z]$/i.test(x) && x.length === s[0].length)) { const m = s[0].match(/^([A-Z]{1,2})(\d{2,3})-([A-Z])$/i); return "A".repeat(m[1].length) + "B".repeat(m[2].length) + "-L"; }
+  return "";
+}
+function parts(item, c) {   // part columns from the file win; the pattern fills in whatever they leave empty
+  const m = splitParts(item.code, c.mask) || {};
+  const p = {}; ["zone", "aisle", "bay", "level", "bin"].forEach(k => p[k] = item[k] || m[k] || "");
+  p.ok = !!(p.aisle || p.bay || p.level || p.bin);
+  return p;
+}
+function arrowOf(item, c) { const a = String(item.arrow || "").trim().toLowerCase(); if (/^(u|up|↑|top|above)$/.test(a)) return "up"; if (/^(d|down|↓|bottom|below)$/.test(a)) return "down"; if (/^(n|no|none|-)$/.test(a)) return "none"; return c.arrow; }
+const join = (...a) => a.filter(Boolean).join("-");
 function labelHTML(item, c, g, warn) {
   const k = TS[c.textSize] || 1, pad = Math.min(3, g.lh * .07, g.lw * .05), W = g.lw - 2 * pad, H = g.lh - 2 * pad;
   const small = t => t ? `<div class="lb-small" style="font-size:${Math.max(1.8, H * .08 * k)}mm">${esc(t)}</div>` : "";
@@ -94,6 +120,44 @@ function labelHTML(item, c, g, warn) {
       ${item.l2 ? `<div class="lb-desc" style="font-size:${Math.max(1.8, H * .085 * k)}mm">${esc(item.l2)}</div>` : ""}
       <div class="lb-grow"></div>${codeBox(t, item.code, TWO_D.has(t) ? bh : W, bh, warn)}
       ${hasHr ? `<div class="lb-hr" style="font-size:${Math.max(1.8, Math.min(H * .075, fit(item.code, W, H * .08)))}mm;margin-top:.6mm">${esc(item.code)}</div>` : ""}${small(item.l3)}`;
+  } else if (c.style === "beam") {
+    const P = parts(item, c); if (!P.ok) warn.push(`${item.code}: location parts not found (set the pattern or part columns)`);
+    const top = P.ok ? join(P.zone && !P.aisle ? P.zone : "", P.aisle) || item.l1 : "", bottom = P.ok ? join(P.bay, P.level, P.bin) || item.code : item.l1;
+    const ar = arrowOf(item, c), s2 = H, aw = ar !== "none" ? H * .75 : 0, tw = W - s2 - aw - pad * 2, lh = top ? H * .46 : H * .8;
+    inner = `<div class="lb-row" style="gap:${pad}mm">${codeBox(c.type, item.code, s2, s2, warn)}
+      <div class="lb-col" style="width:${tw}mm;justify-content:center;align-items:center;gap:${H * .04}mm">
+        ${top ? `<div class="lb-big" style="font-size:${fit(top, tw, lh) * k}mm">${esc(top)}</div>` : ""}<div class="lb-big" style="font-size:${fit(bottom, tw, lh) * k}mm">${esc(bottom)}</div></div>
+      ${aw ? `<div style="width:${aw}mm;height:${H * .85}mm;flex:none">${arrowSvg(ar)}</div>` : ""}</div>`;
+  } else if (c.style === "upright") {
+    if (item.header) {
+      const ar = arrowOf(item, c), aw = ar !== "none" ? Math.min(H * .9, W * .35) : 0, tw = W - aw - pad;
+      inner = `<div class="lb-row" style="justify-content:center;gap:${pad}mm"><div class="lb-big" style="font-size:${fit(item.text, tw, H * .85) * k}mm;justify-content:center">${esc(item.text)}</div>${aw ? `<div style="width:${aw}mm;height:${H * .9}mm;flex:none">${arrowSvg(ar)}</div>` : ""}</div>`;
+    } else {
+      const P = parts(item, c); if (!P.ok) warn.push(`${item.code}: location parts not found (set the pattern or part columns)`);
+      const ar = arrowOf(item, c), lw = W * .3, rw = W - lw, th = H * .4, bh = H - th;
+      const tl = P.ok ? P.aisle || P.zone : "", tr = P.ok ? join(P.bay, P.level) : item.l1, bl = P.ok ? P.bin : "";
+      const qs = bh * .86, aw = ar !== "none" ? Math.min(bh * .8, rw - qs - pad * 2) : 0;
+      inner = `<div class="lb-upr" style="grid-template-columns:30fr 70fr;grid-template-rows:40fr 60fr">
+        <div class="lb-cell"><div class="lb-big" style="font-size:${fit(tl, lw * .9, th * .8) * k}mm">${esc(tl)}</div></div>
+        <div class="lb-cell l"><div class="lb-big" style="font-size:${fit(tr, rw * .9, th * .8) * k}mm">${esc(tr)}</div></div>
+        <div class="lb-cell t"><div class="lb-big" style="font-size:${fit(bl, lw * .9, bh * .7) * k}mm">${esc(bl)}</div></div>
+        <div class="lb-cell t l" style="gap:${pad}mm">${codeBox(c.type, item.code, qs, qs, warn)}${aw ? `<div style="width:${aw}mm;height:${aw}mm;flex:none">${arrowSvg(ar)}</div>` : ""}</div></div>`;
+    }
+  } else if (c.style === "detail") {
+    const P = parts(item, c); if (!P.ok) warn.push(`${item.code}: location parts not found (set the pattern or part columns)`);
+    const ar = arrowOf(item, c), c1 = W * .22, c2 = W * .56, c3 = W - c1 - c2, hh = H * .1, r1 = H * .43, r2 = H - 2 * hh - r1;
+    const cap = t => `<div class="lb-cap" style="font-size:${hh * .72}mm">${t}</div>`, hol = (t, w, h) => { const fs = fit(t, w, h / 1.05, 'Arial,"Helvetica Neue",sans-serif') * Math.min(k, 1); return `<div class="lb-big lb-hollow" style="font-size:${fs}mm;-webkit-text-stroke-width:${Math.max(.25, fs * .03)}mm">${esc(t)}</div>`; };
+    const mid = P.ok ? join(P.level, P.bin) : item.l1, bwid = c2 * .86, bht = r2 * .62;
+    inner = `<div class="lb-det" style="grid-template-columns:22fr 28fr 28fr 22fr;grid-template-rows:10fr 43fr 37fr 10fr">
+      <div class="lb-cell b">${cap("AISLE")}</div><div class="lb-cell b l">${cap("LEVEL")}</div><div class="lb-cell b l">${cap("BIN")}</div><div class="lb-cell b l">${cap(ar === "none" ? "" : ar.toUpperCase())}</div>
+      <div class="lb-cell">${hol(P.ok ? P.aisle || P.zone : "", c1 * .9, r1 * .92)}</div>
+      <div class="lb-cell l" style="grid-column:span 2">${hol(mid, c2 * .92, r1 * .92)}</div>
+      <div class="lb-cell l">${ar !== "none" ? `<div style="width:${Math.min(c3, r1) * .8}mm;height:${r1 * .85}mm">${arrowSvg(ar)}</div>` : ""}</div>
+      <div class="lb-cell t">${hol(P.ok ? P.bay : "", c1 * .9, r2 * .92)}</div>
+      <div class="lb-cell t l" style="grid-column:span 2;flex-direction:column;gap:.6mm">${codeBox(c.type, item.code, bwid, bht, warn)}<div class="lb-hr" style="font-size:${Math.min(r2 * .17, fit(item.code, bwid, r2 * .2))}mm;font-weight:700">${esc(item.code)}</div></div>
+      <div class="lb-cell t l">${codeBox("qrcode", item.code, Math.min(c3, r2) * .86, Math.min(c3, r2) * .86, warn)}</div>
+      <div class="lb-cell t">${cap("BAY")}</div><div class="lb-cell t l" style="grid-column:span 2">${cap("LOCATION")}</div><div class="lb-cell t l">${cap("LOCATION")}</div></div>`;
+    return `<div class="lb-label ${c.border ? "cut" : ""}" style="padding:${pad * .6}mm"><div class="lb-frame">${inner}</div></div>`;
   } else {
     const s = Math.min(H, W * .45), tw = W - s - pad * 1.5;
     inner = `<div class="lb-row">${codeBox(c.type, item.code, s, s, warn)}<div class="lb-col" style="width:${tw}mm;justify-content:center">
@@ -103,8 +167,19 @@ function labelHTML(item, c, g, warn) {
   }
   return `<div class="lb-label ${c.border ? "cut" : ""}" style="padding:${pad}mm">${inner}</div>`;
 }
+function groupRev(rows, c) {   // keep racks in order, reverse the levels inside each rack (top level first)
+  const g = new Map(); rows.forEach(r => { const P = parts(r, c), k = P.ok ? [P.zone, P.aisle, P.bay].join("|") : rackKey(r.code, c.group); if (!g.has(k)) g.set(k, []); g.get(k).push(r); });
+  return [].concat(...[...g.values()].map(a => a.slice().reverse()));
+}
 function rackKey(code, mode) { const k = String(code).toUpperCase(); if (mode === "last_char") return k.length > 3 && /[A-Z]$/.test(k) ? k.slice(0, -1) : k; const m = k.match(/^(.*)[-\/. _]([^-\/. _]+)$/); return m ? m[1] : k; }
 function items(c) {
+  if (c.style === "upright" && c.header) {
+    const out = []; let last = null;
+    const ordered = c.reverse ? groupRev(L.rows, c) : L.rows;
+    for (const r of ordered) { const P = parts(r, c), key = P.ok ? [P.zone, P.aisle, P.bay].join("|") : rackKey(r.code, c.group); if (key !== last) { out.push({header: true, text: P.ok ? P.bay || P.aisle : rackKey(r.code, c.group), arrow: r.arrow, copies: 1}); last = key; } out.push(r); }
+    return out;
+  }
+  if (c.style === "upright" && c.reverse) return groupRev(L.rows, c);
   if (c.style !== "rack") return L.rows;
   const g = new Map();
   L.rows.forEach(r => { const k = rackKey(r.code, c.group); if (!g.has(k)) g.set(k, {rack: String(r.code).slice(0, k.length), levels: [], copies: r.copies}); g.get(k).levels.push(r); });
@@ -134,7 +209,8 @@ function guess(h, style) {
     return {code, l1: sku >= 0 ? sku : -1, l2: desc, l3: batch >= 0 ? batch : exp, copies};
   }
   const code = [loc, bc, sku].find(i => i >= 0) ?? 0;
-  return {code, l1: label, l2: -1, l3: -1, copies};
+  const pz = {zone: f(/^zone$|^area$|^warehouse$/), aisle: f(/^aisle$|^row$/), bay: f(/^bay$|^column$|^col$/), level: f(/^level$|^lvl$|^shelf$/), bin: f(/^bin$|^position$|^pos$|^slot$/), arrow: f(/^arrow$|direction/)};
+  return {code, l1: label, l2: -1, l3: -1, copies, ...pz};
 }
 async function readFile(file) {
   let table;
@@ -156,8 +232,10 @@ function applyMap() {
     if (m.l2 !== m.code) { const m2 = l2.match(DESC_BC); if (m2) l2 = m2[2].trim(); }
     if (!code) return null;
     if (L.cfg.dedupe !== false) { const k = code.toUpperCase(); if (seen.has(k)) { L.dupes++; return null; } seen.add(k); }
-    return {code, l1: v(r, m.l1) || code, l2, l3: v(r, m.l3), copies: Math.max(1, parseInt(v(r, m.copies)) || 1)};
+    return {code, l1: v(r, m.l1) || code, l2, l3: v(r, m.l3), copies: Math.max(1, parseInt(v(r, m.copies)) || 1),
+      zone: v(r, m.zone ?? -1), aisle: v(r, m.aisle ?? -1), bay: v(r, m.bay ?? -1), level: v(r, m.level ?? -1), bin: v(r, m.bin ?? -1), arrow: v(r, m.arrow ?? -1)};
   }).filter(Boolean);
+  if (!L.cfg.maskTouched) { const sm = suggestMask(L.rows.map(r => r.code)); if (sm) L.cfg.mask = sm; }
 }
 async function fromCount(id, what) {
   const rows = []; let from = 0;
@@ -166,6 +244,7 @@ async function fromCount(id, what) {
   if (what === "loc") L.rows = rows.filter(r => !seen.has(r.location.toUpperCase()) && seen.add(r.location.toUpperCase())).map(r => ({code: r.location, l1: r.location, l2: "", l3: "", copies: 1}));
   else L.rows = rows.filter(r => { const k = (r.barcode || r.sku).toUpperCase(); return !seen.has(k) && seen.add(k); }).map(r => ({code: r.barcode || r.sku, l1: r.sku, l2: r.description, l3: r.batch ? `Batch ${r.batch}${r.expiry_date ? ", exp " + r.expiry_date : ""}` : "", copies: 1}));
   L.source = `${rows[0] ? rows[0].session_name : "Count"}: ${what === "loc" ? "locations" : "products"}`; L.table = null;
+  if (!L.cfg.maskTouched) { const sm = suggestMask(L.rows.map(r => r.code)); if (sm) L.cfg.mask = sm; }
 }
 
 /* ---------- page ---------- */
@@ -186,7 +265,9 @@ async function page(main, helpers) {
   renderSrc(counts); renderStyles(); renderOpts(); refresh();
   main.addEventListener("click", e => {
     const s = e.target.closest("[data-src]"); if (s) { L.srcTab = s.dataset.src; $$("[data-src]").forEach(b => b.setAttribute("aria-pressed", b === s)); renderSrc(counts); }
-    const st = e.target.closest("[data-style]"); if (st) { L.cfg.style = st.dataset.style; L.cfg.type = STYLES[L.cfg.style].def; if (L.table && !L.mapTouched) { L.map = guess(L.table[0], L.cfg.style); applyMap(); renderMap(); } save(); renderStyles(); renderOpts(); refresh(); }
+    const st = e.target.closest("[data-style]"); if (st) { L.cfg.style = st.dataset.style; L.cfg.type = STYLES[L.cfg.style].def;
+      const lay = STYLES[L.cfg.style].layout; if (lay) { [L.cfg.paper, L.cfg.cols, L.cfg.rows] = lay; L.cfg.orient = "portrait"; if (L.cfg.arrow === "none") L.cfg.arrow = L.cfg.style === "detail" ? "down" : "up"; }
+      if ($("#lb-parts")) renderParts(); if (L.table && !L.mapTouched) { L.map = guess(L.table[0], L.cfg.style); applyMap(); renderMap(); } save(); renderStyles(); renderOpts(); refresh(); }
   });
   $("#lb-print").onclick = printAll;
 }
@@ -217,9 +298,27 @@ function renderMap() {
     <label class="check small" style="margin-top:10px"><input type="checkbox" id="lb-dedupe" ${L.cfg.dedupe !== false ? "checked" : ""}> One label per barcode value (skip repeated rows)</label>
     <p class="hint">A barcode at the start of a text, like <code>9345156233829-Hair brush</code>, is split out automatically.</p>`;
   $("#lb-dedupe").onchange = e => { L.cfg.dedupe = e.target.checked; save(); applyMap(); refresh(); };
+  renderParts();
   $$("[data-lmap]").forEach(s => s.onchange = () => { L.map[s.dataset.lmap] = +s.value; L.mapTouched = true; applyMap(); refresh(); });
 }
+function renderParts() {
+  let box = $("#lb-parts"); if (!box) { box = document.createElement("div"); box.id = "lb-parts"; $("#lb-map").after(box); }
+  const c = L.cfg, h = L.table ? L.table[0] : null;
+  const opt = sel => `<option value="-1">(none)</option>` + (h || []).map((x, i) => `<option value="${i}" ${sel === i ? "selected" : ""}>${esc(x || "Column " + (i + 1))}</option>`).join("");
+  const ex = L.rows[0] ? parts(L.rows[0], c) : null;
+  box.innerHTML = `<details class="lb-partbox" ${STYLES[c.style].parts ? "open" : ""}><summary><strong>Location parts</strong> <span class="small muted">for the beam, upright and detailed styles</span></summary>
+    <label class="field" style="margin-top:10px">Location pattern<input id="lb-mask" value="${esc(c.mask)}" placeholder="e.g. ZZZZABBLLP" autocapitalize="characters" spellcheck="false"></label>
+    <p class="hint">One letter per character of the location code: <strong>Z</strong> zone, <strong>A</strong> aisle, <strong>B</strong> bay, <strong>L</strong> level, <strong>P</strong> bin (position). Anything else is skipped. <code>W2C2M0103B</code> with <code>ZZZZABBLLP</code> gives aisle M, bay 01, level 03, bin B.</p>
+    ${ex ? `<p class="small" style="margin:0 0 8px">${ex.ok ? `First label <code>${esc(L.rows[0].code)}</code>: ${[["Zone", ex.zone], ["Aisle", ex.aisle], ["Bay", ex.bay], ["Level", ex.level], ["Bin", ex.bin]].filter(x => x[1]).map(([a, b]) => `${a} <strong>${esc(b)}</strong>`).join(", ") || "no parts"}` : `<span style="color:var(--bad)">The pattern doesn't match <code>${esc(L.rows[0].code)}</code>: it must have the same number of characters.</span>`}</p>` : ""}
+    ${h ? `<p class="small muted" style="margin:0 0 4px">Or take the parts from columns in your file (these win over the pattern):</p><div class="map">${PARTS.map(([k, l]) => `<label class="field">${l}<select data-lmap="${k}">${opt(L.map[k] ?? -1)}</select></label>`).join("")}</div>` : ""}</details>`;
+  const mi = $("#lb-mask"); let t;
+  mi.oninput = () => { clearTimeout(t); t = setTimeout(() => { c.mask = mi.value.trim(); c.maskTouched = true; save(); renderParts(); $("#lb-mask").focus(); const e = $("#lb-mask"); e.setSelectionRange(e.value.length, e.value.length); refresh(); }, 400); };
+  $$("[data-lmap]", box).forEach(s => s.onchange = () => { L.map[s.dataset.lmap] = +s.value; L.mapTouched = true; applyMap(); renderParts(); refresh(); });
+}
 function sampleItem(style) {
+  if (style === "beam") return {code: "J104-04-B", aisle: "J1", bay: "04", level: "04", bin: "B", arrow: "up"};
+  if (style === "upright") return {code: "T0960C", aisle: "T", bay: "60", level: "C", bin: "09", arrow: "up"};
+  if (style === "detail") return {code: "W2C2M0103B", zone: "W2C2", aisle: "M", bay: "01", level: "03", bin: "B", arrow: "down"};
   if (style === "rack") return {rack: "W2C2M0103", levels: ["C", "B", "A"].map(x => ({code: "W2C2M0103" + x, l1: "W2C2M0103" + x}))};
   if (style === "prod") return {code: "9345156233829", l1: "7000294", l2: "Hair brush, vent", l3: "Batch 52021052"};
   return {code: "W2C2M0103B", l1: "W2C2M0103B", l2: "", l3: ""};
@@ -227,8 +326,8 @@ function sampleItem(style) {
 function renderStyles() {
   const box = $("#lb-styles");
   box.innerHTML = Object.entries(STYLES).map(([k, s]) => {
-    const c = {...L.cfg, style: k, type: STYLES[k].types.includes(L.cfg.type) ? L.cfg.type : s.def, arrow: k === "loc" ? "up" : "none", border: false};
-    const g = {lw: 70, lh: k === "rack" ? 44 : 32};
+    const c = {...L.cfg, style: k, type: STYLES[k].types.includes(L.cfg.type) ? L.cfg.type : s.def, arrow: k === "loc" ? "up" : "none", border: false, textSize: "M"};
+    const g = {lw: 70, lh: k === "rack" ? 44 : k === "detail" ? 26 : k === "upright" ? 36 : 22};
     return `<button class="lb-style" data-style="${k}" aria-pressed="${L.cfg.style === k}"><div class="lb-thumb"><div class="lb-thumb-in" style="width:${g.lw}mm;height:${g.lh}mm">${labelHTML(sampleItem(k), c, g, [])}</div></div><strong>${s.name}</strong><span>${s.desc}</span></button>`;
   }).join("");
   $$(".lb-thumb-in", box).forEach(el => { const p = el.parentElement; el.style.zoom = Math.min(p.clientWidth / el.offsetWidth, 110 / el.offsetHeight); });
@@ -243,7 +342,7 @@ function renderOpts() {
     <label class="field">Page margin (mm)<input type="number" min="0" max="30" step="0.5" data-o="margin" value="${c.margin}"></label>
     <label class="field">Gap between labels (mm)<input type="number" min="0" max="20" step="0.5" data-o="gap" value="${c.gap}"></label>
     <label class="field">Barcode type<select data-o="type">${STYLES[c.style].types.map(t => `<option value="${t}" ${c.type === t ? "selected" : ""}>${TYPES[t]}</option>`).join("")}</select></label>
-    ${c.style === "loc" || c.style === "rack" ? `<label class="field">Arrow<select data-o="arrow">${[["none", "No arrow"], ["up", "Pointing up"], ["down", "Pointing down"]].map(([k, l]) => `<option value="${k}" ${c.arrow === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}
+    ${["loc", "rack", "beam", "upright", "detail"].includes(c.style) ? `<label class="field">Arrow<select data-o="arrow">${[["none", "No arrow"], ["up", "Pointing up"], ["down", "Pointing down"]].map(([k, l]) => `<option value="${k}" ${c.arrow === k ? "selected" : ""}>${l}</option>`).join("")}</select><span class="small muted" style="font-weight:400">An Arrow column in the file overrides this per label.</span></label>` : ""}
     ${c.style === "rack" ? `<label class="field">Levels are<select data-o="group"><option value="last_char" ${c.group === "last_char" ? "selected" : ""}>The last letter (W2C2M0103A)</option><option value="last_segment" ${c.group === "last_segment" ? "selected" : ""}>The last part (A01-01-A)</option></select></label>` : ""}
     <label class="field">Text size<select data-o="textSize">${[["S", "Small"], ["M", "Medium"], ["L", "Large"]].map(([k, l]) => `<option value="${k}" ${c.textSize === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
     <label class="field">Copies of each label<input type="number" min="1" max="99" data-o="copies" value="${c.copies}"></label>
@@ -252,7 +351,8 @@ function renderOpts() {
   <div class="row" style="margin-top:12px;gap:18px">
     <label class="check"><input type="checkbox" data-o="border" ${c.border ? "checked" : ""}> Cut lines</label>
     <label class="check"><input type="checkbox" data-o="showText" ${c.showText ? "checked" : ""}> Code under barcode</label>
-    ${c.style === "rack" ? `<label class="check"><input type="checkbox" data-o="reverse" ${c.reverse ? "checked" : ""}> Reverse level order</label>` : ""}
+    ${c.style === "rack" || c.style === "upright" ? `<label class="check"><input type="checkbox" data-o="reverse" ${c.reverse ? "checked" : ""}> Top level first</label>` : ""}
+    ${c.style === "upright" ? `<label class="check"><input type="checkbox" data-o="header" ${c.header ? "checked" : ""}> Bay header label before each rack</label>` : ""}
   </div>
   <p class="hint" style="margin-top:10px">Use <strong>Start at label position</strong> to reuse a partly used label sheet. Print at <strong>100% / Actual size</strong> with margins set to <strong>None</strong>.</p>`;
   $$("[data-o]").forEach(el => el.onchange = () => {
@@ -280,6 +380,9 @@ function refresh() {
   requestAnimationFrame(() => { const w = pv.clientWidth; $$(".lb-sheet", pv).forEach(s => { const k = Math.min(1, (w / (c.cols > 2 || c.orient === "landscape" ? 1 : 2) - 16) / s.offsetWidth); s.style.zoom = k; }); });
 }
 function sampleRows(style) {
+  if (style === "beam") return ["A", "B"].flatMap(p => ["03", "04"].map(l => ({code: `J104-${l}-${p}`, aisle: "J1", bay: "04", level: l, bin: p, arrow: "up"})));
+  if (style === "upright") return ["C", "B", "A"].map(l => ({code: `T0960${l}`, aisle: "T", bay: "60", level: l, bin: "09", arrow: "up"}));
+  if (style === "detail") return ["A", "B", "C"].flatMap(b => ["01", "03"].map(l => ({code: `W2C2M01${l}${b}`, zone: "W2C2", aisle: "M", bay: "01", level: l, bin: b, arrow: l === "01" ? "up" : "down"})));
   if (style === "prod") return [{code: "9345156233829", l1: "7000294", l2: "My Beauty hair brush, vent", l3: "Batch 52021052"}, {code: "7000333", l1: "7000333", l2: "Hair and scalp massage brush", l3: ""}];
   return ["A", "B", "C"].flatMap(b => ["01", "02"].map(x => `W2C2M01${x}${b}`)).sort().map(x => ({code: x, l1: x, l2: "", l3: ""}));
 }

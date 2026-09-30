@@ -1,5 +1,6 @@
-Barcode,Label text,Line 2,Line 3,Copies
-W2C2M0103A,,,,1
-W2C2M0103B,,,,1
-W2C2M0103C,,,,1
-9345156233829,7000294,My Beauty Hair Brush Vent,Batch 52021052,2
+Barcode,Aisle,Bay,Level,Bin,Arrow,Label text,Line 2,Line 3,Copies
+W2C2M0103A,M,01,03,A,down,,,,1
+W2C2M0103B,M,01,03,B,down,,,,1
+J104-04-B,J1,04,04,B,up,,,,1
+T0960C,T,60,C,09,up,,,,1
+9345156233829,,,,,,7000294,My Beauty Hair Brush Vent,Batch 52021052,2

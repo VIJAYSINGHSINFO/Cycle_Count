@@ -143,6 +143,11 @@ The APK from Part 4 is a *debug* build. It's fine for testing and for installing
    - **Rack levels:** one label per rack, with a row and barcode for each level (A, B, C…).
    - **Product label:** SKU, description and barcode. EAN-13 is used automatically when the barcode is valid.
    - **QR label:** a QR or Data Matrix code with text, for small bins.
+   - **Beam label:** QR code, aisle above bay-level-bin (for example `J1` over `04-04-B`), and an arrow.
+   - **Upright label:** a grid with aisle, bay-level, bin and QR code, plus a bay header label (such as `60 ↑`) before each rack.
+   - **Detailed location label:** aisle, bay, level and bin in large outlined text, with a Code 128 barcode, a QR code and an UP/DOWN arrow.
+
+   The last three need the **location parts**. Either add columns called Aisle, Bay, Level, Bin (and optionally Zone and Arrow) to the file, or enter a **location pattern**: one letter per character, with Z = zone, A = aisle, B = bay, L = level and P = bin. For example, `ZZZZABBLLP` splits `W2C2M0103B` into aisle M, bay 01, level 03, bin B. The pattern is suggested automatically for common formats. An **Arrow** column (up/down) sets the arrow per label.
 4. **Choose the paper:** A4 or A5, portrait or landscape, and labels per sheet (1 up to 40, or custom rows and columns). The screen shows each label's size in mm. For label sheets, set the page margin and gap to match the sheet.
 5. Click **Print labels**. In the print window set **Scale: 100% / Actual size**, **Margins: None**, and turn off **Headers and footers**. To keep a file instead, choose **Save as PDF** as the printer.
    - **Start at label position** lets you reuse a partly used label sheet.
