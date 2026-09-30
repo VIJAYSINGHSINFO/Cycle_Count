@@ -1,0 +1,102 @@
+# Builds everything whenever you change the code, or when you click "Run workflow" on the Actions tab:
+#  - the website (console + mobile web app) on GitHub Pages
+#  - the Android app (APK), downloadable from the run's Artifacts section
+name: Build Cycle Count
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: build
+  cancel-in-progress: true
+
+jobs:
+  website:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: pages
+        uses: actions/configure-pages@v5
+      - name: Write database connection
+        run: node scripts/write-config.js
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+      - name: Build site
+        run: |
+          npm install --no-save qrcode@1
+          node scripts/build-site.js
+        env:
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  android:
+    runs-on: ubuntu-latest
+    env:
+      KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Write database connection
+        run: node scripts/write-config.js
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
+      - name: Prepare Android project
+        working-directory: mobile
+        run: |
+          npm install
+          if [ -n "${{ vars.APP_ID }}" ]; then node -e "const f='capacitor.config.json',c=JSON.parse(require('fs').readFileSync(f));c.appId='${{ vars.APP_ID }}';require('fs').writeFileSync(f,JSON.stringify(c,null,2))"; fi
+          npx cap add android
+          node scripts/patch-android.js
+          npx capacitor-assets generate --android || echo "Icon generation skipped"
+          npx cap sync android
+      - name: Load signing key
+        if: ${{ env.KEYSTORE_B64 != '' }}
+        run: echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+      - name: Build APK
+        working-directory: mobile/android
+        env:
+          CC_VERSION_CODE: ${{ github.run_number }}
+          CC_VERSION_NAME: 1.0.${{ github.run_number }}
+          CC_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CC_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          CC_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          if [ -n "$KEYSTORE_B64" ]; then
+            export CC_KEYSTORE="$RUNNER_TEMP/release.keystore"
+            ./gradlew assembleRelease bundleRelease --no-daemon
+          else
+            ./gradlew assembleDebug --no-daemon
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cycle-count-android
+          path: |
+            mobile/android/app/build/outputs/apk/**/*.apk
+            mobile/android/app/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
