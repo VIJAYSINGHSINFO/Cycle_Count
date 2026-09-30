@@ -1,0 +1,22 @@
+{
+  "name": "cycle-count-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cycle Count mobile app (Android) built with Capacitor",
+  "scripts": {
+    "android:add": "cap add android && node scripts/patch-android.js",
+    "android:sync": "cap sync android",
+    "android:open": "cap open android",
+    "icons": "capacitor-assets generate --android",
+    "serve": "npx --yes http-server www -p 8080 -c-1"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/core": "^8.5.2",
+    "@capacitor-mlkit/barcode-scanning": "^8.2.1"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
+    "@capacitor/cli": "^8.5.2"
+  }
+}

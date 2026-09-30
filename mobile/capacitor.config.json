@@ -1,0 +1,11 @@
+{
+  "appId": "com.yourcompany.cyclecount",
+  "appName": "Cycle Count",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "SplashScreen": { "launchShowDuration": 0 }
+  }
+}

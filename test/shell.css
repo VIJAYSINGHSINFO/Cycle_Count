@@ -1,0 +1,10 @@
+.steps{padding-left:20px;margin:10px 0 16px}.steps li{margin-bottom:8px}
+.choose{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.choose .btn{flex-direction:column;align-items:flex-start;text-align:left;padding:14px;min-height:78px;gap:2px}
+.choose .btn span{font-size:.82rem;font-weight:400;opacity:.8}
+.tl-float{position:fixed;z-index:45;display:flex;gap:6px;left:10px}
+.tl-float.desktop{bottom:12px}
+.tl-float.mobile{bottom:calc(142px + env(safe-area-inset-bottom,0px))}
+.tl-pill{font:600 11px/1 var(--sans);padding:6px 9px;border-radius:99px;border:1px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer}
+.tl-pill.bad{color:var(--bad);border-color:var(--bad)}
+@media (max-width:420px){.choose{grid-template-columns:1fr}}
