@@ -153,6 +153,28 @@ The APK from Part 4 is a *debug* build. It's fine for testing and for installing
    - **Start at label position** lets you reuse a partly used label sheet.
    - If a code can't be encoded in the chosen barcode type (for example letters in EAN-13), or the bars would be too thin to scan, the console lists it before printing.
 
+## Order QC (checking picked orders before dispatch)
+
+Order QC checks that each picked order has exactly the right quantity of every product before it leaves.
+
+**Adding it to an existing setup (once):** in Supabase open **SQL Editor > New query**, paste the whole of the new `supabase/schema.sql` and click **Run**. It keeps your existing counts and only adds what's missing. Then upload the new files to GitHub as usual; the website and the APK rebuild by themselves. Install the new APK on the phones.
+
+**Supervisor, in the console:**
+1. Open **Order QC** and click **Upload orders**. Choose the WMS export of picked orders (Excel or CSV, one row per order line; see `docs/order-file-template.csv`). Needed: order number, SKU and order quantity. Helpful: barcode, description, storer, customer, UOM.
+2. Check the columns the console picked. Operators check against the column chosen as **Order quantity**.
+3. Choose **Tote scan** (off, optional or required) and whether operators **may type a quantity** for full cases. Click **Upload orders**. Orders already uploaded are skipped.
+4. Watch progress on the Order QC page. Orders **Short: waiting for pick** need the missing units picked. If they can't be supplied, open the order and click **Release short** with the reason. **Unlock** frees an order left open on someone's phone; **Reset scans** starts it again; **Cancel order** closes it so it can be uploaded again.
+
+**Operator, on the phone:**
+1. Tap **Order QC** at the top, then scan the order number on the pick list.
+2. Scan every unit. The screen shows each product as scanned / ordered.
+3. A red screen stops the operator when a unit is more than the order needs, or when a product isn't in the order. Nothing is counted; the operator puts the item aside and taps to continue.
+4. Tap **Finish QC**. If anything is missing, the phone lists it. Check the tote and packing table, scan anything found, or tap **Send back for picking**. When the missing units arrive, scan the order number again and scan them.
+
+**What the system won't allow:** counting more than the order quantity, passing an order with missing units (unless a supervisor releases it with a reason), two people checking the same order at once, uploading the same order twice, or changing a passed order. Every scan, refused scan and removed unit is kept in the order's activity history.
+
+**What it can't detect:** the same physical unit scanned twice. Spot-check orders from the activity history, and look at the **Units removed** and **Refused scans** figures for patterns.
+
 ## Something not working?
 
 | Problem | Fix |
@@ -162,4 +184,6 @@ The APK from Part 4 is a *debug* build. It's fine for testing and for installing
 | The **android** job fails | Open the failed step and read the last lines. The most common cause is a mistake in `APP_ID`: letters, numbers, dots and underscores only, at least two parts (`ae.company.cyclecount`). |
 | The website link shows 404 | **Settings > Pages > Source** must be **GitHub Actions**, and the **website** job must have finished. |
 | Barcodes look like `9.34516E+12` | The CSV was saved through Excel. Export it from the WMS again and upload it without opening it in Excel. |
+| Operator sees **no longer assigned to you** | A supervisor unlocked, reset or closed the order. Go back to the order list and scan the order number again; scans that were rejected can be sent again or discarded. |
+| Order QC says **Order not found** | The order hasn't been uploaded, or the number on the pick list is a different field. Try the reference number, or check which column was chosen as Order number. |
 | **Try the demo** | Every connection screen has a demo link with sample data. Nothing is saved. Use **Exit demo** in the yellow bar to leave. |

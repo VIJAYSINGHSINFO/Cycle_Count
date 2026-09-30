@@ -9,7 +9,7 @@ const ls = {get: k => { try { return localStorage.getItem(k); } catch { return n
 const addStyle = css => { const s = document.createElement("style"); s.textContent = css; document.head.appendChild(s); };
 const runScript = code => { const s = document.createElement("script"); s.textContent = code; document.body.appendChild(s); };
 const loadScript = src => new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = rej; setTimeout(res, 12000); document.head.appendChild(s); });
-const COLLS = ["cc_users", "cc_sessions", "cc_recon", "cc_lines", "cc_events"];
+const COLLS = ["cc_users", "cc_sessions", "cc_recon", "cc_lines", "cc_events", "cc_qc_orders", "cc_qc_lines", "cc_qc_events"];
 const canon = v => JSON.stringify(v, (k, x) => x && typeof x === "object" && !Array.isArray(x) ? Object.keys(x).sort().reduce((o, key) => (o[key] = x[key], o), {}) : x);
 const clone = o => JSON.parse(JSON.stringify(o));
 
@@ -62,7 +62,8 @@ async function start(app) {
     const store = {users: [], sessions: [], lines: [], events: [], reconciliations: [], presence: {}, id: 0, evId: 0, clock: Date.now(), channels: [], sessionFor: {}};
     const put = (arr, coll) => remote[coll].forEach(d => { arr.push(d.data); sent.set(`${coll}/${d.id}`, canon(d.data)); known.add(`${coll}/${d.id}`); });
     put(store.users, "cc_users"); put(store.sessions, "cc_sessions"); put(store.reconciliations, "cc_recon");
-    for (const [coll, arr, pre] of [["cc_lines", store.lines, "l"], ["cc_events", store.events, "e"]]) remote[coll].forEach(d => {
+    if (remote.cc_qc_orders.length) { store.qcOrders = []; store.qcLines = []; store.qcEvents = []; put(store.qcOrders, "cc_qc_orders"); put(store.qcLines, "cc_qc_lines"); }
+    for (const [coll, arr, pre] of [["cc_lines", store.lines, "l"], ["cc_events", store.events, "e"], ["cc_qc_events", store.qcEvents, "e"]]) if (arr) remote[coll].forEach(d => {
       known.add(`${coll}/${d.id}`);
       Object.entries(d.data).forEach(([f, v]) => { if (f[0] !== pre || v == null) return; arr.push(v); sent.set(`${coll}/${d.id}#${f}`, canon(v)); if (pre === "l") linesSent.set(v.id, v.updated_at); });
     });
@@ -95,7 +96,8 @@ function syncLabel(t, bad) { const e = $("#tl-sync"); if (e) { e.textContent = t
 function startSync(S, sent, known, linesSent) {
   let busy = false, evCount = 0, lastLen = -1;
   const lineDoc = l => `cc_lines/${l.session_id}__${l.id >= 1e9 ? "x" + Math.floor((l.id - 1e9) / 250) : "c" + Math.floor(l.id / 250)}`;
-  const items = () => [["cc_users", S.users], ["cc_sessions", S.sessions], ["cc_recon", S.reconciliations]];
+  const items = () => [["cc_users", S.users], ["cc_sessions", S.sessions], ["cc_recon", S.reconciliations], ["cc_qc_orders", S.qcOrders || []], ["cc_qc_lines", S.qcLines || []]];
+  let qcCount = 0;
   async function out() {
     if (busy) return; busy = true;
     try {
@@ -113,8 +115,12 @@ function startSync(S, sent, known, linesSent) {
         if (!e._c) e._c = `cc_events/${S.evPrefix}${Math.floor(evCount++ / 300)}`;
         const k = `${e._c}#e${e.id}`; if (!sent.has(k)) addField(e._c, "e" + e.id, clone(e), k);
       }
+      for (const e of S.qcEvents || []) {
+        if (!e._c) e._c = `cc_qc_events/${S.evPrefix}${Math.floor(qcCount++ / 300)}`;
+        const k = `${e._c}#e${e.id}`; if (!sent.has(k)) addField(e._c, "e" + e.id, clone(e), k);
+      }
       for (const k of [...sent.keys()]) {
-        if (k.startsWith("cc_events/")) continue;
+        if (k.startsWith("cc_events/") || k.startsWith("cc_qc_events/")) continue;
         if (k.includes("#")) { if (scanAll && !seen.has(k)) { const [p, f] = k.split("#"); addField(p, f, null, k); } }
         else if (!seen.has(k)) docs.push({p: k, del: true});
       }
@@ -141,7 +147,7 @@ function startSync(S, sent, known, linesSent) {
   // changes from the other device
   const replaceIn = (arr, id, remote) => { const i = arr.findIndex(x => x.id === id); if (remote == null) { if (i >= 0) arr.splice(i, 1); } else if (i >= 0) { const o = arr[i]; Object.keys(o).forEach(k => delete o[k]); Object.assign(o, remote); } else arr.push(remote); };
   const bump = t => { const v = Date.parse(t || ""); if (v > S.clock) S.clock = v; };
-  for (const [coll, get] of [["cc_users", () => S.users], ["cc_sessions", () => S.sessions], ["cc_recon", () => S.reconciliations]]) {
+  for (const [coll, get] of [["cc_users", () => S.users], ["cc_sessions", () => S.sessions], ["cc_recon", () => S.reconciliations], ["cc_qc_orders", () => S.qcOrders], ["cc_qc_lines", () => S.qcLines]]) {
     db.collection(coll).onSnapshot(snap => {
       const ids = new Set();
       snap.docs.forEach(d => { const p = `${coll}/${d.id}`; ids.add(p); known.add(p); const r = clone(d.data()), rj = canon(r); if (rj === sent.get(p)) return;
@@ -163,10 +169,10 @@ function startSync(S, sent, known, linesSent) {
     });
     lastLen = S.lines.length;
   }, () => syncLabel("Live updates stopped", true));
-  db.collection("cc_events").onSnapshot(snap => {
-    const have = new Set(S.events.map(e => String(e.id)));
-    snap.docs.forEach(d => { const p = `cc_events/${d.id}`; known.add(p); const data = d.data();
-      for (const f in data) { if (f[0] !== "e" || data[f] == null) continue; const k = `${p}#${f}`; if (sent.has(k)) continue; const r = clone(data[f]); if (!have.has(String(r.id))) { S.events.push(r); have.add(String(r.id)); } sent.set(k, canon(r)); } });
+  for (const [coll, get] of [["cc_events", () => S.events], ["cc_qc_events", () => S.qcEvents]]) db.collection(coll).onSnapshot(snap => {
+    const arr = get(), have = new Set(arr.map(e => String(e.id)));
+    snap.docs.forEach(d => { const p = `${coll}/${d.id}`; known.add(p); const data = d.data();
+      for (const f in data) { if (f[0] !== "e" || data[f] == null) continue; const k = `${p}#${f}`; if (sent.has(k)) continue; const r = clone(data[f]); if (!have.has(String(r.id))) { arr.push(r); have.add(String(r.id)); } sent.set(k, canon(r)); } });
   });
 }
 })();

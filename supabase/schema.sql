@@ -551,3 +551,349 @@ grant select, insert, delete on public.count_lines to authenticated;
 grant select on public.count_events, public.reconciliations to authenticated;
 grant select on public.count_lines_v, public.session_list, public.reconciliation_list, public.event_list to authenticated;
 revoke all on all tables in schema public from anon;
+
+-- =====================================================================
+-- ORDER QC (quantity check of picked orders before dispatch)
+-- Added in version 3. Safe to re-run.
+--
+--   pending ──> in_progress ──> passed                        (final)
+--                    │
+--                    └──> short ──> in_progress (after the extra pick)
+--                            └──> released  (supervisor approves shipping short, final)
+--   pending / in_progress / short ──> cancelled (supervisor, final)
+--
+-- Rules the database enforces (not just the apps):
+--   * An order can't be uploaded twice (same storer + order number) unless the first was cancelled.
+--   * Only one person checks an order at a time. A supervisor can unlock it.
+--   * Scanned quantity can never be more than the order quantity. Extra units are logged as
+--     "set aside" and never counted.
+--   * An order passes only when every line is complete. A short order needs the missing units
+--     scanned, or a supervisor's release with a reason.
+--   * Passed, released and cancelled orders are frozen.
+--   * Every scan, rejected scan, undo and status change is kept in qc_events. A scan sent twice
+--     from an offline phone is stored once.
+-- =====================================================================
+create table if not exists public.qc_orders (
+  id           uuid primary key default gen_random_uuid(),
+  order_no     text not null,
+  reference    text not null default '',          -- second number, e.g. the customer's order number
+  storer       text not null default '',
+  customer     text not null default '',
+  source_file  text,
+  status       text not null default 'pending' check (status in ('pending', 'in_progress', 'short', 'passed', 'released', 'cancelled')),
+  tote_mode    text not null default 'off' check (tote_mode in ('off', 'optional', 'required')),
+  allow_qty    boolean not null default false,     -- operators may type a quantity instead of scanning each unit
+  assigned_to  uuid references public.profiles (id),
+  assigned_at  timestamptz,
+  started_at   timestamptz,
+  short_at     timestamptz,
+  finished_at  timestamptz,
+  finished_by  uuid references public.profiles (id),
+  closed_note  text,                               -- reason for release or cancel
+  closed_by    uuid references public.profiles (id),
+  closed_at    timestamptz,
+  created_by   uuid references public.profiles (id) default auth.uid(),
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+create unique index if not exists qc_orders_live_idx on public.qc_orders (upper(storer), upper(order_no)) where status <> 'cancelled';
+create index if not exists qc_orders_status_idx on public.qc_orders (status, created_at desc);
+create index if not exists qc_orders_no_idx on public.qc_orders (upper(order_no));
+create index if not exists qc_orders_ref_idx on public.qc_orders (upper(reference));
+drop trigger if exists qc_orders_touch on public.qc_orders;
+create trigger qc_orders_touch before update on public.qc_orders for each row execute function public.touch_updated_at();
+
+create table if not exists public.qc_lines (
+  id            bigint generated always as identity primary key,
+  order_id      uuid not null references public.qc_orders (id) on delete cascade,
+  line_no       integer not null,
+  sku           text not null,
+  barcode       text not null default '',
+  description   text not null default '',
+  uom           text not null default '',
+  batch         text not null default '',
+  expected_qty  numeric(14,3) not null check (expected_qty > 0),
+  scanned_qty   numeric(14,3) not null default 0,
+  over_qty      numeric(14,3) not null default 0 check (over_qty >= 0),
+  updated_at    timestamptz not null default now(),
+  constraint qc_lines_scanned_range check (scanned_qty >= 0 and scanned_qty <= expected_qty)
+);
+create unique index if not exists qc_lines_sku_idx on public.qc_lines (order_id, upper(sku));
+create index if not exists qc_lines_barcode_idx on public.qc_lines (order_id, barcode);
+create index if not exists qc_lines_sku_all_idx on public.qc_lines (upper(sku));
+drop trigger if exists qc_lines_touch on public.qc_lines;
+create trigger qc_lines_touch before update on public.qc_lines for each row execute function public.touch_updated_at();
+
+create table if not exists public.qc_events (
+  id          bigint generated always as identity primary key,
+  order_id    uuid not null references public.qc_orders (id) on delete cascade,
+  line_id     bigint references public.qc_lines (id) on delete cascade,
+  event       text not null check (event in ('import', 'start', 'resume', 'pause', 'scan', 'over', 'wrong_item', 'unknown', 'undo', 'tote',
+                                             'finish', 'short', 'unlock', 'release', 'cancel', 'reset')),
+  qty         numeric(14,3),
+  code        text,
+  tote        text,
+  note        text,
+  user_id     uuid references public.profiles (id) default auth.uid(),
+  device      text,
+  client_id   uuid unique,
+  client_ts   timestamptz,
+  created_at  timestamptz not null default now()
+);
+create index if not exists qc_events_order_idx on public.qc_events (order_id, created_at);
+create index if not exists qc_events_user_idx on public.qc_events (user_id, created_at);
+
+alter table public.qc_orders enable row level security;
+alter table public.qc_lines  enable row level security;
+alter table public.qc_events enable row level security;
+-- Supervisors read everything. Operators read only through the qc_mobile_* functions below.
+-- Nobody writes these tables directly: every change goes through the functions, which also write the audit trail.
+drop policy if exists qc_orders_read on public.qc_orders;
+create policy qc_orders_read on public.qc_orders for select to authenticated using (public.is_staff());
+drop policy if exists qc_lines_read on public.qc_lines;
+create policy qc_lines_read on public.qc_lines for select to authenticated using (public.is_staff());
+drop policy if exists qc_events_read on public.qc_events;
+create policy qc_events_read on public.qc_events for select to authenticated using (public.is_staff() or user_id = auth.uid());
+
+-- Upload orders from the console.
+-- p_orders: [{ "order_no": "SO1", "reference": "", "storer": "TGD", "customer": "",
+--              "lines": [{ "sku": "7000294", "barcode": "9345…", "description": "", "uom": "", "batch": "", "qty": 3 }] }]
+create or replace function public.qc_import(p_orders jsonb, p_source_file text default null, p_tote_mode text default 'off', p_allow_qty boolean default false)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare o jsonb; l jsonb; v_id uuid; v_orders int := 0; v_lines int := 0; v_n int; v_dupes jsonb := '[]'::jsonb; v_no text; v_storer text; v_qty numeric;
+begin
+  if not public.is_staff() then raise exception 'Only supervisors can upload orders' using errcode = '42501'; end if;
+  if coalesce(p_tote_mode, '') not in ('off', 'optional', 'required') then raise exception 'Tote scanning must be off, optional or required'; end if;
+  for o in select * from jsonb_array_elements(p_orders) loop
+    v_no := trim(coalesce(o ->> 'order_no', '')); v_storer := trim(coalesce(o ->> 'storer', ''));
+    if v_no = '' then continue; end if;
+    if exists (select 1 from qc_orders where upper(storer) = upper(v_storer) and upper(order_no) = upper(v_no) and status <> 'cancelled') then
+      v_dupes := v_dupes || to_jsonb(v_no); continue;
+    end if;
+    insert into qc_orders (order_no, reference, storer, customer, source_file, tote_mode, allow_qty)
+    values (v_no, trim(coalesce(o ->> 'reference', '')), v_storer, trim(coalesce(o ->> 'customer', '')), p_source_file, p_tote_mode, coalesce(p_allow_qty, false))
+    returning id into v_id;
+    v_n := 0;
+    for l in select * from jsonb_array_elements(coalesce(o -> 'lines', '[]'::jsonb)) loop
+      v_qty := (l ->> 'qty')::numeric;
+      if coalesce(trim(l ->> 'sku'), '') = '' or v_qty is null or v_qty <= 0 then continue; end if;
+      v_n := v_n + 1;
+      insert into qc_lines (order_id, line_no, sku, barcode, description, uom, batch, expected_qty)
+      values (v_id, v_n, trim(l ->> 'sku'), coalesce(trim(l ->> 'barcode'), ''), coalesce(l ->> 'description', ''), coalesce(l ->> 'uom', ''),
+              coalesce(l ->> 'batch', ''), v_qty);
+    end loop;
+    if v_n = 0 then raise exception 'Order % has no lines with a SKU and a quantity above 0', v_no; end if;
+    insert into qc_events (order_id, event, qty, note) values (v_id, 'import', v_n, p_source_file);
+    v_orders := v_orders + 1; v_lines := v_lines + v_n;
+  end loop;
+  return jsonb_build_object('orders', v_orders, 'lines', v_lines, 'duplicates', v_dupes);
+end $$;
+
+-- Operator opens an order for QC (claims it). Also resumes a short order after the extra pick.
+create or replace function public.qc_start(p_order uuid, p_device text default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare o public.qc_orders; v_name text;
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  select * into o from qc_orders where id = p_order for update;
+  if not found then raise exception 'Order not found'; end if;
+  if o.status = 'passed' then raise exception 'Order % has already passed QC', o.order_no; end if;
+  if o.status = 'released' then raise exception 'Order % was released short by a supervisor', o.order_no; end if;
+  if o.status = 'cancelled' then raise exception 'Order % was cancelled', o.order_no; end if;
+  if o.assigned_to is not null and o.assigned_to <> auth.uid() then
+    select full_name into v_name from profiles where id = o.assigned_to;
+    raise exception '% is checking order %. If they have stopped, ask a supervisor to unlock it.', coalesce(nullif(v_name, ''), 'Another user'), o.order_no;
+  end if;
+  update qc_orders set status = 'in_progress', assigned_to = auth.uid(), assigned_at = now(), started_at = coalesce(started_at, now()) where id = p_order;
+  if o.assigned_to is null then
+    insert into qc_events (order_id, event, device) values (p_order, case when o.status = 'short' then 'resume' when o.started_at is null then 'start' else 'resume' end, p_device);
+  end if;
+  return (select to_jsonb(x) from qc_orders x where x.id = p_order);
+end $$;
+
+-- Operator steps away: the order stays in progress (scans are kept) but anyone can pick it up.
+create or replace function public.qc_pause(p_order uuid, p_device text default null)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  update qc_orders set assigned_to = null, assigned_at = null where id = p_order and assigned_to = auth.uid() and status = 'in_progress';
+  if found then insert into qc_events (order_id, event, device) values (p_order, 'pause', p_device); end if;
+end $$;
+
+-- Scans from the phone (one at a time, or a batch from the offline queue).
+-- p_entries: [{ "kind": "scan"|"over"|"undo"|"wrong_item"|"unknown"|"tote", "line_id": 1, "qty": 1, "code": "…", "tote": "…",
+--               "note": "…", "client_id": "uuid", "client_ts": "…" }]
+-- A scan that would go above the order quantity is split: the part that fits is counted, the rest is logged as set aside.
+create or replace function public.qc_submit(p_order uuid, p_entries jsonb, p_device text default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare o public.qc_orders; e jsonb; v_line public.qc_lines; v_cid uuid; v_qty numeric; v_fit numeric; v_kind text; v_ts timestamptz;
+        v_saved int := 0; v_dupes int := 0; v_adjusted int := 0; v_skipped int := 0;
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  select * into o from qc_orders where id = p_order for update;
+  if not found then raise exception 'Order not found'; end if;
+  if o.status <> 'in_progress' or o.assigned_to is distinct from auth.uid() then
+    raise exception 'Order % is no longer assigned to you. A supervisor may have unlocked, reset or closed it.', o.order_no using errcode = 'P0001';
+  end if;
+  for e in select * from jsonb_array_elements(p_entries) loop
+    v_cid := nullif(e ->> 'client_id', '')::uuid;
+    if v_cid is not null and exists (select 1 from qc_events where client_id = v_cid) then v_dupes := v_dupes + 1; continue; end if;
+    v_kind := e ->> 'kind'; v_qty := coalesce((e ->> 'qty')::numeric, 1); v_ts := (e ->> 'client_ts')::timestamptz;
+    if v_kind in ('scan', 'over', 'undo') then
+      if v_qty <= 0 then v_skipped := v_skipped + 1; continue; end if;
+      select * into v_line from qc_lines where id = (e ->> 'line_id')::bigint and order_id = p_order for update;
+      if not found then v_skipped := v_skipped + 1; continue; end if;
+    end if;
+    if v_kind = 'scan' then
+      v_fit := least(v_qty, v_line.expected_qty - v_line.scanned_qty);
+      if v_fit > 0 then
+        update qc_lines set scanned_qty = scanned_qty + v_fit where id = v_line.id;
+        insert into qc_events (order_id, line_id, event, qty, code, tote, device, client_id, client_ts)
+        values (p_order, v_line.id, 'scan', v_fit, e ->> 'code', nullif(e ->> 'tote', ''), p_device, v_cid, v_ts);
+      end if;
+      if v_fit < v_qty then
+        update qc_lines set over_qty = over_qty + (v_qty - v_fit) where id = v_line.id;
+        insert into qc_events (order_id, line_id, event, qty, code, tote, note, device, client_id, client_ts)
+        values (p_order, v_line.id, 'over', v_qty - v_fit, e ->> 'code', nullif(e ->> 'tote', ''), 'More than the order quantity', p_device,
+                case when v_fit > 0 then null else v_cid end, v_ts);
+        v_adjusted := v_adjusted + 1;
+      end if;
+    elsif v_kind = 'over' then
+      update qc_lines set over_qty = over_qty + v_qty where id = v_line.id;
+      insert into qc_events (order_id, line_id, event, qty, code, tote, note, device, client_id, client_ts)
+      values (p_order, v_line.id, 'over', v_qty, e ->> 'code', nullif(e ->> 'tote', ''), coalesce(e ->> 'note', 'More than the order quantity'), p_device, v_cid, v_ts);
+    elsif v_kind = 'undo' then
+      v_fit := least(v_qty, v_line.scanned_qty);
+      update qc_lines set scanned_qty = scanned_qty - v_fit where id = v_line.id;
+      insert into qc_events (order_id, line_id, event, qty, tote, note, device, client_id, client_ts)
+      values (p_order, v_line.id, 'undo', v_fit, nullif(e ->> 'tote', ''), e ->> 'note', p_device, v_cid, v_ts);
+    elsif v_kind in ('wrong_item', 'unknown', 'tote') then
+      insert into qc_events (order_id, event, code, tote, note, device, client_id, client_ts)
+      values (p_order, v_kind, e ->> 'code', nullif(e ->> 'tote', ''), e ->> 'note', p_device, v_cid, v_ts);
+    else v_skipped := v_skipped + 1; continue;
+    end if;
+    v_saved := v_saved + 1;
+  end loop;
+  return jsonb_build_object('saved', v_saved, 'duplicates', v_dupes, 'adjusted', v_adjusted, 'skipped', v_skipped);
+end $$;
+
+-- Operator finishes. Complete: passed. Short: nothing changes unless p_confirm_short, then it waits for picking.
+create or replace function public.qc_finish(p_order uuid, p_confirm_short boolean default false, p_device text default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare o public.qc_orders; v_short numeric; v_lines int;
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  select * into o from qc_orders where id = p_order for update;
+  if not found then raise exception 'Order not found'; end if;
+  if o.status <> 'in_progress' or o.assigned_to is distinct from auth.uid() then raise exception 'Order % is no longer assigned to you', o.order_no; end if;
+  select coalesce(sum(expected_qty - scanned_qty), 0), count(*) filter (where scanned_qty < expected_qty) into v_short, v_lines
+    from qc_lines where order_id = p_order;
+  if v_short = 0 then
+    update qc_orders set status = 'passed', finished_at = now(), finished_by = auth.uid(), assigned_to = null, assigned_at = null where id = p_order;
+    insert into qc_events (order_id, event, device) values (p_order, 'finish', p_device);
+    return jsonb_build_object('status', 'passed');
+  end if;
+  if not coalesce(p_confirm_short, false) then
+    return jsonb_build_object('status', 'check', 'short_units', v_short, 'short_lines', v_lines);
+  end if;
+  update qc_orders set status = 'short', short_at = now(), assigned_to = null, assigned_at = null where id = p_order;
+  insert into qc_events (order_id, event, qty, note, device) values (p_order, 'short', v_short, v_lines || case when v_lines = 1 then ' line short' else ' lines short' end, p_device);
+  return jsonb_build_object('status', 'short', 'short_units', v_short, 'short_lines', v_lines);
+end $$;
+
+-- Supervisor actions. p_action: unlock | release | cancel | reset. Release, cancel and reset need a reason.
+create or replace function public.qc_supervise(p_order uuid, p_action text, p_note text default null)
+returns void language plpgsql security definer set search_path = public as $$
+declare o public.qc_orders; v_note text := nullif(trim(coalesce(p_note, '')), '');
+begin
+  if not public.is_staff() then raise exception 'Only supervisors can do this' using errcode = '42501'; end if;
+  select * into o from qc_orders where id = p_order for update;
+  if not found then raise exception 'Order not found'; end if;
+  if o.status in ('passed', 'released', 'cancelled') then raise exception 'Order % is closed and can''t be changed', o.order_no; end if;
+  if p_action in ('release', 'cancel', 'reset') and v_note is null then raise exception 'Enter a reason'; end if;
+  if p_action = 'unlock' then
+    if o.assigned_to is null then raise exception 'Nobody is checking this order'; end if;
+    update qc_orders set assigned_to = null, assigned_at = null where id = p_order;
+  elsif p_action = 'release' then
+    if o.status <> 'short' then raise exception 'Only a short order can be released'; end if;
+    update qc_orders set status = 'released', closed_note = v_note, closed_by = auth.uid(), closed_at = now(), assigned_to = null, assigned_at = null where id = p_order;
+  elsif p_action = 'cancel' then
+    update qc_orders set status = 'cancelled', closed_note = v_note, closed_by = auth.uid(), closed_at = now(), assigned_to = null, assigned_at = null where id = p_order;
+  elsif p_action = 'reset' then
+    update qc_lines set scanned_qty = 0, over_qty = 0 where order_id = p_order;
+    update qc_orders set status = 'pending', assigned_to = null, assigned_at = null, started_at = null, short_at = null where id = p_order;
+  else raise exception 'Unknown action %', p_action;
+  end if;
+  insert into qc_events (order_id, event, note) values (p_order, p_action, v_note);
+end $$;
+
+-- Totals per order
+drop view if exists public.qc_order_list, public.qc_line_v, public.qc_event_list;
+drop view if exists public.qc_order_stats;
+create view public.qc_order_stats with (security_invoker = true) as
+select o.id as order_id,
+       count(l.id)                                                      as lines_total,
+       count(l.id) filter (where l.scanned_qty >= l.expected_qty)       as lines_done,
+       coalesce(sum(l.expected_qty), 0)                                 as units_expected,
+       coalesce(sum(l.scanned_qty), 0)                                  as units_scanned,
+       coalesce(sum(l.expected_qty - l.scanned_qty), 0)                 as units_short,
+       coalesce(sum(l.over_qty), 0)                                     as units_over
+from public.qc_orders o left join public.qc_lines l on l.order_id = o.id
+group by o.id;
+
+create view public.qc_order_list with (security_invoker = true) as
+select o.*, st.lines_total, st.lines_done, st.units_expected, st.units_scanned, st.units_short, st.units_over,
+       a.full_name as assigned_name, c.full_name as created_by_name, f.full_name as finished_by_name, x.full_name as closed_by_name
+from public.qc_orders o
+join public.qc_order_stats st on st.order_id = o.id
+left join public.profiles a on a.id = o.assigned_to
+left join public.profiles c on c.id = o.created_by
+left join public.profiles f on f.id = o.finished_by
+left join public.profiles x on x.id = o.closed_by;
+
+create view public.qc_line_v with (security_invoker = true) as
+select l.*, (l.expected_qty - l.scanned_qty) as short_qty, o.order_no, o.reference, o.storer, o.customer, o.status as order_status, o.created_at as order_created_at
+from public.qc_lines l join public.qc_orders o on o.id = l.order_id;
+
+create view public.qc_event_list with (security_invoker = true) as
+select e.*, p.full_name as user_name, l.sku, o.order_no
+from public.qc_events e
+join public.qc_orders o on o.id = e.order_id
+left join public.profiles p on p.id = e.user_id
+left join public.qc_lines l on l.id = e.line_id;
+
+-- Feeds for the mobile app. With p_search (a scanned order or reference number) it returns that order whatever its status,
+-- so the phone can say "already passed" instead of "not found".
+drop function if exists public.qc_mobile_orders(text);
+create or replace function public.qc_mobile_orders(p_search text default null)
+returns table (id uuid, order_no text, reference text, storer text, customer text, status text, tote_mode text, allow_qty boolean,
+               assigned_to uuid, assigned_name text, lines_total bigint, lines_done bigint, units_expected numeric, units_scanned numeric,
+               units_over numeric, created_at timestamptz)
+language sql stable security definer set search_path = public as $$
+  select o.id, o.order_no, o.reference, o.storer, o.customer, o.status, o.tote_mode, o.allow_qty, o.assigned_to, a.full_name,
+         st.lines_total, st.lines_done, st.units_expected, st.units_scanned, st.units_over, o.created_at
+  from qc_orders o join qc_order_stats st on st.order_id = o.id left join profiles a on a.id = o.assigned_to
+  where public.my_role() is not null
+    and (case when nullif(trim(coalesce(p_search, '')), '') is null then o.status in ('pending', 'in_progress', 'short')
+              else upper(o.order_no) = upper(trim(p_search)) or (o.reference <> '' and upper(o.reference) = upper(trim(p_search))) end)
+  order by (o.assigned_to = auth.uid()) desc nulls last, o.created_at
+  limit 500
+$$;
+
+create or replace function public.qc_mobile_lines(p_order uuid)
+returns table (id bigint, line_no int, sku text, barcode text, description text, uom text, batch text,
+               expected_qty numeric, scanned_qty numeric, over_qty numeric, updated_at timestamptz)
+language sql stable security definer set search_path = public as $$
+  select l.id, l.line_no, l.sku, l.barcode, l.description, l.uom, l.batch, l.expected_qty, l.scanned_qty, l.over_qty, l.updated_at
+  from qc_lines l where l.order_id = p_order and public.my_role() is not null order by l.line_no
+$$;
+
+revoke all on function public.qc_import(jsonb, text, text, boolean), public.qc_start(uuid, text), public.qc_pause(uuid, text),
+  public.qc_submit(uuid, jsonb, text), public.qc_finish(uuid, boolean, text), public.qc_supervise(uuid, text, text),
+  public.qc_mobile_orders(text), public.qc_mobile_lines(uuid) from public, anon;
+grant execute on function public.qc_import(jsonb, text, text, boolean), public.qc_start(uuid, text), public.qc_pause(uuid, text),
+  public.qc_submit(uuid, jsonb, text), public.qc_finish(uuid, boolean, text), public.qc_supervise(uuid, text, text),
+  public.qc_mobile_orders(text), public.qc_mobile_lines(uuid) to authenticated;
+grant select on public.qc_orders, public.qc_lines, public.qc_events to authenticated;
+grant select on public.qc_order_stats, public.qc_order_list, public.qc_line_v, public.qc_event_list to authenticated;
+revoke all on public.qc_orders, public.qc_lines, public.qc_events from anon;

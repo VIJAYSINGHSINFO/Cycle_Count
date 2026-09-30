@@ -6,7 +6,7 @@ Two apps sharing one database:
 
 | App | Who uses it | What it does |
 |---|---|---|
-| **Desktop console** (`desktop/`) | Supervisors and administrators | Create counts, upload stock files (50,000+ lines), open and close counts, review variances, request recounts, accept variances, reconcile, export to Excel, search history, manage users |
+| **Desktop console** (`desktop/`) | Supervisors and administrators | Upload orders for QC and handle short orders, print barcode labels, create counts, upload stock files (50,000+ lines), open and close counts, review variances, request recounts, accept variances, reconcile, export to Excel, search history, manage users |
 | **Mobile app** (`mobile/`) | Counters | Sign in, pick an open count, go to the suggested location, scan the location label, scan each product, record excess and misplaced stock with batch and dates, keep counting offline |
 | **Database** (`supabase/schema.sql`) | Both apps | Stores every count permanently with a full audit trail and reconciliation records |
 
@@ -26,6 +26,12 @@ Open `desktop/index.html` or `mobile/www/index.html` in a browser before setting
    - **Not in the stock file at all**: the app offers **Record as excess**.
 6. Misplaced and excess stock need the product details. Batch number, manufacturing date and expiry date can each be set per count to required, optional or not asked; by default expiry is required.
 7. **Location complete** saves anything expected but not scanned as 0 (not found), after asking the operator to confirm. The next location then comes up automatically.
+
+## Order QC
+
+Picked orders are uploaded on the console and checked unit by unit on the phone before dispatch. Extra units and products not in the order are refused with a full-screen stop; missing units send the order back for picking until they're scanned, or until a supervisor releases it short with a reason. The database enforces these rules itself (see the Order QC section of `supabase/schema.sql`). Setup and daily use: `docs/SETUP-GUIDE.md`, section **Order QC**.
+
+Order file columns: order number, SKU and order quantity are required; reference, storer, customer, product barcode, description, UOM and batch are optional. WMS exports such as `ORDERKEY, EXTERNORDERKEY, STORERKEY, C_COMPANY, SKU, DESCR, ORIGINALQTY, UOM` are recognised automatically. Rows for the same SKU in one order are added together.
 
 ## Stock file columns
 
@@ -175,6 +181,8 @@ mobile/                      counter app (Capacitor project for Android)
 docs/GOOGLE-PLAY.md          publishing options and checklist
 shared/theme.css, demo.js     master copies of the shared styles and demo data (copy into both apps after editing)
 ```
+
+`scripts/build-test.js` builds a single-file test page with both apps in demo mode (`node scripts/build-test.js`).
 
 ## Maintenance
 

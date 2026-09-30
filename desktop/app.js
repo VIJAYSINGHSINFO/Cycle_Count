@@ -36,7 +36,7 @@ async function boot() {
   if (!session) return renderLogin();
   try { const rows = await q(sb.rpc("whoami")); S.me = rows && rows[0]; } catch (e) { S.me = null; }
   if (!S.me || !S.me.active) return renderMessage("Waiting for approval", `Your account (${esc(session.user.email)}) was created. An administrator needs to approve it and assign a role before you can sign in.`);
-  if (S.me.role === "counter") return renderMessage("Use the mobile app", "This console is for supervisors and administrators. Counters record counts in the Cycle Count mobile app.");
+  if (S.me.role === "counter") return renderMessage("Use the mobile app", "This console is for supervisors and administrators. Operators count stock and check orders in the Cycle Count mobile app.");
   renderShell();
 }
 sb.auth.onAuthStateChange((ev, session) => {   // react only when the signed-in user actually changes
@@ -80,6 +80,7 @@ function renderShell() {
       <a href="#/counts" data-nav="counts">Counts</a>
       <a href="#/history" data-nav="history">Reconciliation history</a>
       <a href="#/items" data-nav="items">Item history</a>
+      <a href="#/qc" data-nav="qc">Order QC</a>
       <a href="#/labels" data-nav="labels">Barcode labels</a>
       ${S.me.role === "admin" ? `<a href="#/users" data-nav="users">Users</a>` : ""}
       <div class="me">${esc(S.me.full_name)}<br><span style="opacity:.7">${S.me.role === "admin" ? "Administrator" : "Supervisor"}</span><br><button data-act="signout">Sign out</button></div>
@@ -93,8 +94,11 @@ function onRoute() {
   const [page, id, tab] = route();
   $$(".side a").forEach(a => a.setAttribute("aria-current", a.dataset.nav === page ? "page" : "false"));
   const m = $("#main"); m.innerHTML = `<div class="loading">Loading…</div>`;
-  ({counts: pageCounts, count: () => pageCount(id, tab || "overview"), history: pageHistory, items: pageItems, labels: () => window.CCLabels.page($("#main"), {sb, q, toast, parseDelimited}), users: pageUsers}[page] || pageCounts)();
+  ({counts: pageCounts, count: () => pageCount(id, tab || "overview"), history: pageHistory, items: pageItems, labels: () => window.CCLabels.page($("#main"), {sb, q, toast, parseDelimited}), qc: () => window.CCQc.page($("#main"), qcCtx(), id), users: pageUsers}[page] || pageCounts)();
 }
+
+const QC_CACHE = {};
+function qcCtx() { return {sb, q, toast, fail, run, esc, fmt, dt, go, route, readTable, saveWorkbook, cache: QC_CACHE, me: S.me, setTimer: (fn, ms) => { stopTimer(); S.timer = setInterval(fn, ms); }}; }
 
 /* ---------- counts list ---------- */
 async function pageCounts() {
@@ -250,14 +254,18 @@ function parseDelimited(text) {
   row.push(cur); if (row.some(x => x.trim())) rows.push(row.map(x => x.trim()));
   return rows;
 }
+async function readTable(file) {   // Excel or CSV to rows of trimmed text, padded to the same width
+  let table;
+  if (/\.xlsx?$/i.test(file.name)) { const wb = XLSX.read(await file.arrayBuffer(), {type: "array"}); table = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header: 1, raw: true, defval: ""}).map(r => r.map(v => String(v).trim())).filter(r => r.some(v => v !== "")); }
+  else table = parseDelimited(await file.text());
+  if (!table.length) throw new Error("The file has no rows.");
+  const w = Math.max(...table.slice(0, 50).map(r => r.length)); table.forEach(r => { while (r.length < w) r.push(""); });
+  return table;
+}
 async function readFile(file) {
   toast(`Reading ${file.name}…`);
   try {
-    let table;
-    if (/\.xlsx?$/i.test(file.name)) { const wb = XLSX.read(await file.arrayBuffer(), {type: "array"}); table = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header: 1, raw: true, defval: ""}).map(r => r.map(v => String(v).trim())).filter(r => r.some(v => v !== "")); }
-    else table = parseDelimited(await file.text());
-    if (!table.length) throw new Error("The file has no rows.");
-    const w = Math.max(...table.slice(0, 50).map(r => r.length)); table.forEach(r => { while (r.length < w) r.push(""); });
+    const table = await readTable(file);
     const g = guessMap(table[0]), header = g.location >= 0 || g.sku >= 0;
     pending = {table, name: file.name, header, map: header ? g : {...POS_MAP}};
     pending.descBarcode = header && g.barcode < 0 && g.description >= 0 && descBarcodeShare(table.slice(1), g.description) >= 0.2;
@@ -494,7 +502,7 @@ async function pageUsers() {
     ${pendingN ? `<div class="banner warn"><span>${pendingN} account${pendingN === 1 ? " is" : "s are"} waiting for approval.</span></div>` : ""}
     <div class="tablewrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Site</th><th>Access</th><th></th></tr></thead><tbody>
     ${rows.map(u => `<tr data-uid="${u.id}"><td><input class="search" style="min-width:160px" data-f="full_name" value="${esc(u.full_name)}"></td><td class="small">${esc(u.email || "")}</td>
-      <td><select class="search" style="min-width:0" data-f="role" ${u.id === S.me.id ? "disabled" : ""}>${[["counter", "Counter (mobile)"], ["supervisor", "Supervisor"], ["admin", "Administrator"]].map(([k, l]) => `<option value="${k}" ${u.role === k ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+      <td><select class="search" style="min-width:0" data-f="role" ${u.id === S.me.id ? "disabled" : ""}>${[["counter", "Operator (mobile: counting and QC)"], ["supervisor", "Supervisor"], ["admin", "Administrator"]].map(([k, l]) => `<option value="${k}" ${u.role === k ? "selected" : ""}>${l}</option>`).join("")}</select></td>
       <td><input class="search" style="min-width:100px" data-f="site" value="${esc(u.site)}"></td>
       <td><label class="check"><input type="checkbox" data-f="active" ${u.active ? "checked" : ""} ${u.id === S.me.id ? "disabled" : ""}> ${u.active ? "Active" : "Not approved"}</label></td>
       <td><button class="btn sm" data-act="save-user">Save</button></td></tr>`).join("")}</tbody></table></div>`;

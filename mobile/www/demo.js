@@ -58,6 +58,124 @@ function seed() {
 const S = store;
 const tick = () => new Date(S.clock = Math.max(S.clock + 1000, Date.now())).toISOString();
 const uname = id => (S.users.find(u => u.id === id) || {}).full_name || null;
+
+/* ---------- Order QC (demo) ---------- */
+if (!S.qcOrders) seedQc(S);
+function seedQc(S) {
+  const P = {"PHC-30112": ["6297000331189", "Paracetamol 500 mg, 24 tabs", "PK"], "PHC-30458": ["6297000331523", "Hand sanitiser 500 ml", "BTL"], "PHC-50221": ["6297001102290", "Baby wipes, 80 pcs", "PK"],
+    "PHC-70503": ["6297002205031", "Toothpaste 100 ml", "TUBE"], "FMC-10231": ["6291041500213", "Basmati rice 5 kg", "BAG"], "FMC-10877": ["6291003001452", "Sunflower oil 1.8 L", "BTL"],
+    "FMC-60118": ["6291018000186", "Mineral water 1.5 L x 6", "PK"], "FMC-80044": ["6291071800447", "Green tea, 100 bags", "BOX"], "FMC-40090": ["6291056300098", "Medjool dates 1 kg", "BOX"],
+    "FMC-40317": ["6291056300715", "Natural honey 500 g", "JAR"], "FMC-20411": ["6294003570021", "Laundry detergent 3 kg", "BOX"], "FMC-20566": ["6291100250437", "Dishwashing liquid 1 L", "BTL"]};
+  const orders = [], lines = [], events = []; let n = 0, e = 0;
+  const base = {reference: "", storer: "DEMO", customer: "", source_file: "Orders_2026-09-30.xlsx", status: "pending", tote_mode: "off", allow_qty: false, assigned_to: null, assigned_at: null, started_at: null,
+    short_at: null, finished_at: null, finished_by: null, closed_note: null, closed_by: null, closed_at: null, created_by: "u-sup", created_at: "2026-09-30T06:50:00Z", updated_at: "2026-09-30T06:50:00Z"};
+  const add = (o, ls) => { orders.push({...base, ...o}); ls.forEach(([sku, exp, scanned = 0, over = 0], i) => lines.push({id: "ql" + (++n), order_id: o.id, line_no: i + 1, sku, barcode: P[sku][0], description: P[sku][1], uom: P[sku][2], batch: "", expected_qty: exp, scanned_qty: scanned, over_qty: over, updated_at: o.updated_at || base.updated_at}));
+    events.push({id: "qe" + (++e), order_id: o.id, line_id: null, event: "import", qty: ls.length, note: base.source_file, user_id: "u-sup", created_at: base.created_at}); };
+  add({id: "q-1", order_no: "SO-2609301", reference: "PO-88412", customer: "Al Noor Pharmacy"}, [["PHC-30112", 4], ["PHC-30458", 2], ["PHC-50221", 3], ["PHC-70503", 6]]);
+  add({id: "q-2", order_no: "SO-2609302", reference: "PO-88419", customer: "Green Valley Supermarket", tote_mode: "optional", allow_qty: true}, [["FMC-10231", 2], ["FMC-10877", 12], ["FMC-60118", 5], ["FMC-80044", 1]]);
+  add({id: "q-3", order_no: "SO-2609303", reference: "PO-88423", customer: "Blue Line Café", tote_mode: "required"}, [["FMC-40090", 2], ["FMC-40317", 3], ["FMC-80044", 2]]);
+  add({id: "q-4", order_no: "SO-2609297", reference: "PO-88390", customer: "City Mart", status: "short", started_at: "2026-09-30T07:20:00Z", short_at: "2026-09-30T07:34:00Z", updated_at: "2026-09-30T07:34:00Z"}, [["FMC-20411", 3, 3], ["FMC-20566", 4, 2], ["PHC-50221", 2, 2, 1]]);
+  add({id: "q-5", order_no: "SO-2609290", reference: "PO-88377", customer: "Al Noor Pharmacy", status: "passed", started_at: "2026-09-30T07:00:00Z", finished_at: "2026-09-30T07:09:00Z", finished_by: "u-priya", updated_at: "2026-09-30T07:09:00Z"}, [["PHC-30112", 6, 6, 1], ["PHC-70503", 4, 4]]);
+  add({id: "q-6", order_no: "SO-2609299", reference: "PO-88402", customer: "Sunrise Grocery", status: "in_progress", assigned_to: "u-priya", assigned_at: "2026-09-30T07:40:00Z", started_at: "2026-09-30T07:40:00Z"}, [["FMC-10231", 3, 1], ["FMC-60118", 2]]);
+  events.push({id: "qe" + (++e), order_id: "q-4", line_id: null, event: "short", qty: 2, note: "1 line short", user_id: "u-priya", created_at: "2026-09-30T07:34:00Z"},
+              {id: "qe" + (++e), order_id: "q-4", line_id: "ql14", event: "over", qty: 1, code: "6297001102290", note: "More than the order quantity", user_id: "u-priya", created_at: "2026-09-30T07:31:00Z"},
+              {id: "qe" + (++e), order_id: "q-5", line_id: null, event: "finish", user_id: "u-priya", created_at: "2026-09-30T07:09:00Z"});
+  Object.assign(S, {qcOrders: orders, qcLines: lines, qcEvents: events});
+}
+const qcStats = o => { const L = S.qcLines.filter(l => l.order_id === o.id);
+  return {lines_total: L.length, lines_done: L.filter(l => +l.scanned_qty >= +l.expected_qty).length, units_expected: L.reduce((a, l) => a + +l.expected_qty, 0), units_scanned: L.reduce((a, l) => a + +l.scanned_qty, 0),
+    units_short: L.reduce((a, l) => a + (l.expected_qty - l.scanned_qty), 0), units_over: L.reduce((a, l) => a + +l.over_qty, 0)}; };
+const qcList = () => S.qcOrders.map(o => ({...o, ...qcStats(o), assigned_name: uname(o.assigned_to), created_by_name: uname(o.created_by), finished_by_name: uname(o.finished_by), closed_by_name: uname(o.closed_by)}));
+function qcRpc(name, a, me, staff) {
+  const ord = id => S.qcOrders.find(o => o.id === id);
+  const qev = (o, event, x = {}) => S.qcEvents.push({id: (S.evPrefix || "") + "q" + (++S.evId), order_id: o.id, line_id: null, event, qty: null, code: null, tote: null, note: null, user_id: me.id, device: null, client_id: null, created_at: tick(), ...x});
+  const touch = o => { o.updated_at = tick(); };
+  const active = me && me.active;
+  if (!active) return E("Your user is not active");
+  switch (name) {
+    case "qc_mobile_orders": {
+      const s = String(a.p_search || "").trim().toUpperCase();
+      const rows = qcList().filter(o => s ? (o.order_no.toUpperCase() === s || (o.reference && o.reference.toUpperCase() === s)) : ["pending", "in_progress", "short"].includes(o.status))
+        .sort((x, y) => (y.assigned_to === me.id) - (x.assigned_to === me.id) || (x.created_at < y.created_at ? -1 : 1));
+      return {data: rows, error: null};
+    }
+    case "qc_mobile_lines": return {data: S.qcLines.filter(l => l.order_id === a.p_order).sort((x, y) => x.line_no - y.line_no).map(l => ({...l})), error: null};
+    case "qc_import": {
+      if (!staff) return E("Only supervisors can upload orders");
+      let orders = 0, lines = 0; const dupes = [];
+      for (const o of a.p_orders) {
+        const no = String(o.order_no || "").trim(), storer = String(o.storer || "").trim(); if (!no) continue;
+        if (S.qcOrders.some(x => x.status !== "cancelled" && x.order_no.toUpperCase() === no.toUpperCase() && x.storer.toUpperCase() === storer.toUpperCase())) { dupes.push(no); continue; }
+        const rec = {id: "q-" + Math.random().toString(36).slice(2, 9), order_no: no, reference: String(o.reference || "").trim(), storer, customer: String(o.customer || "").trim(), source_file: a.p_source_file || null,
+          status: "pending", tote_mode: a.p_tote_mode || "off", allow_qty: !!a.p_allow_qty, assigned_to: null, assigned_at: null, started_at: null, short_at: null, finished_at: null, finished_by: null,
+          closed_note: null, closed_by: null, closed_at: null, created_by: me.id, created_at: tick(), updated_at: tick()};
+        const ls = (o.lines || []).filter(l => String(l.sku || "").trim() && +l.qty > 0);
+        if (!ls.length) return E(`Order ${no} has no lines with a SKU and a quantity above 0`);
+        S.qcOrders.push(rec);
+        ls.forEach((l, i) => S.qcLines.push({id: "ql" + Math.random().toString(36).slice(2, 10), order_id: rec.id, line_no: i + 1, sku: String(l.sku).trim(), barcode: String(l.barcode || "").trim(), description: l.description || "", uom: l.uom || "", batch: l.batch || "", expected_qty: +l.qty, scanned_qty: 0, over_qty: 0, updated_at: tick()}));
+        qev(rec, "import", {qty: ls.length, note: a.p_source_file || null}); orders++; lines += ls.length;
+      }
+      return {data: {orders, lines, duplicates: dupes}, error: null};
+    }
+    case "qc_start": {
+      const o = ord(a.p_order); if (!o) return E("Order not found");
+      if (o.status === "passed") return E(`Order ${o.order_no} has already passed QC`);
+      if (o.status === "released") return E(`Order ${o.order_no} was released short by a supervisor`);
+      if (o.status === "cancelled") return E(`Order ${o.order_no} was cancelled`);
+      if (o.assigned_to && o.assigned_to !== me.id) return E(`${uname(o.assigned_to) || "Another user"} is checking order ${o.order_no}. If they have stopped, ask a supervisor to unlock it.`);
+      const was = o.assigned_to, prev = o.status, started = o.started_at;
+      Object.assign(o, {status: "in_progress", assigned_to: me.id, assigned_at: tick(), started_at: o.started_at || tick()}); touch(o);
+      if (!was) qev(o, prev === "short" || started ? "resume" : "start", {device: a.p_device});
+      return {data: {...o}, error: null};
+    }
+    case "qc_pause": { const o = ord(a.p_order); if (o && o.assigned_to === me.id && o.status === "in_progress") { o.assigned_to = null; o.assigned_at = null; touch(o); qev(o, "pause", {device: a.p_device}); } return {data: null, error: null}; }
+    case "qc_submit": {
+      const o = ord(a.p_order); if (!o) return E("Order not found");
+      if (o.status !== "in_progress" || o.assigned_to !== me.id) return E(`Order ${o.order_no} is no longer assigned to you. A supervisor may have unlocked, reset or closed it.`);
+      let saved = 0, duplicates = 0, adjusted = 0, skipped = 0;
+      for (const e of a.p_entries) {
+        if (e.client_id && S.qcEvents.some(x => x.client_id === e.client_id)) { duplicates++; continue; }
+        const q = e.qty == null ? 1 : +e.qty, base = {code: e.code || null, tote: e.tote || null, device: a.p_device, client_id: e.client_id || null, client_ts: e.client_ts || null};
+        let l = null;
+        if (["scan", "over", "undo"].includes(e.kind)) { if (!(q > 0)) { skipped++; continue; } l = S.qcLines.find(x => String(x.id) === String(e.line_id) && x.order_id === o.id); if (!l) { skipped++; continue; } }
+        if (e.kind === "scan") {
+          const fit = Math.min(q, l.expected_qty - l.scanned_qty);
+          if (fit > 0) { l.scanned_qty += fit; qev(o, "scan", {...base, line_id: l.id, qty: fit}); }
+          if (fit < q) { l.over_qty += q - fit; qev(o, "over", {...base, line_id: l.id, qty: q - fit, note: "More than the order quantity", client_id: fit > 0 ? null : base.client_id}); adjusted++; }
+          l.updated_at = tick();
+        } else if (e.kind === "over") { l.over_qty += q; l.updated_at = tick(); qev(o, "over", {...base, line_id: l.id, qty: q, note: e.note || "More than the order quantity"}); }
+        else if (e.kind === "undo") { const fit = Math.min(q, l.scanned_qty); l.scanned_qty -= fit; l.updated_at = tick(); qev(o, "undo", {...base, line_id: l.id, qty: fit, note: e.note || null}); }
+        else if (["wrong_item", "unknown", "tote"].includes(e.kind)) qev(o, e.kind, {...base, note: e.note || null});
+        else { skipped++; continue; }
+        saved++;
+      }
+      touch(o);
+      return {data: {saved, duplicates, adjusted, skipped}, error: null};
+    }
+    case "qc_finish": {
+      const o = ord(a.p_order); if (!o) return E("Order not found");
+      if (o.status !== "in_progress" || o.assigned_to !== me.id) return E(`Order ${o.order_no} is no longer assigned to you`);
+      const L = S.qcLines.filter(l => l.order_id === o.id), short = L.reduce((x, l) => x + (l.expected_qty - l.scanned_qty), 0), sl = L.filter(l => l.scanned_qty < l.expected_qty).length;
+      if (!short) { Object.assign(o, {status: "passed", finished_at: tick(), finished_by: me.id, assigned_to: null, assigned_at: null}); touch(o); qev(o, "finish", {device: a.p_device}); return {data: {status: "passed"}, error: null}; }
+      if (!a.p_confirm_short) return {data: {status: "check", short_units: short, short_lines: sl}, error: null};
+      Object.assign(o, {status: "short", short_at: tick(), assigned_to: null, assigned_at: null}); touch(o); qev(o, "short", {qty: short, note: `${sl} line${sl === 1 ? "" : "s"} short`, device: a.p_device});
+      return {data: {status: "short", short_units: short, short_lines: sl}, error: null};
+    }
+    case "qc_supervise": {
+      if (!staff) return E("Only supervisors can do this");
+      const o = ord(a.p_order), note = String(a.p_note || "").trim() || null; if (!o) return E("Order not found");
+      if (["passed", "released", "cancelled"].includes(o.status)) return E(`Order ${o.order_no} is closed and can't be changed`);
+      if (["release", "cancel", "reset"].includes(a.p_action) && !note) return E("Enter a reason");
+      if (a.p_action === "unlock") { if (!o.assigned_to) return E("Nobody is checking this order"); Object.assign(o, {assigned_to: null, assigned_at: null}); }
+      else if (a.p_action === "release") { if (o.status !== "short") return E("Only a short order can be released"); Object.assign(o, {status: "released", closed_note: note, closed_by: me.id, closed_at: tick(), assigned_to: null, assigned_at: null}); }
+      else if (a.p_action === "cancel") Object.assign(o, {status: "cancelled", closed_note: note, closed_by: me.id, closed_at: tick(), assigned_to: null, assigned_at: null});
+      else if (a.p_action === "reset") { S.qcLines.filter(l => l.order_id === o.id).forEach(l => { l.scanned_qty = 0; l.over_qty = 0; l.updated_at = tick(); }); Object.assign(o, {status: "pending", assigned_to: null, assigned_at: null, started_at: null, short_at: null}); }
+      else return E("Unknown action " + a.p_action);
+      touch(o); qev(o, a.p_action, {note}); return {data: null, error: null};
+    }
+  }
+  return E("Unknown function " + name);
+}
 function lineStatus(l, tol) {
   if (l.counted_qty == null) return l.recount_requested ? "recount" : "uncounted";
   if (+l.counted_qty === +l.system_qty) return "match";
@@ -83,7 +201,10 @@ const views = {
     return {...l, status: lineStatus(l, +s.tolerance_pct), variance: v, variance_pct: v == null ? null : +l.system_qty === 0 ? (l.counted_qty ? 100 : 0) : Math.round(v / Math.abs(l.system_qty) * 10000) / 100,
       variance_value: v == null ? null : v * l.unit_cost, sort_weight: Math.abs(v || 0) * Math.max(l.unit_cost, 0.0001), counted_by_name: uname(l.counted_by), session_name: s.name, session_site: s.site, session_status: s.status, session_created_at: s.created_at}; }),
   reconciliation_list: () => S.reconciliations.map(r => { const s = S.sessions.find(x => x.id === r.session_id); return {...r, session_name: s.name, site: s.site, zone: s.zone, source_file: s.source_file, session_created_at: s.created_at, closed_at: s.closed_at, approved_by_name: uname(r.approved_by)}; }),
-  event_list: () => S.events.map(e => { const l = S.lines.find(x => x.id === e.line_id); return {...e, user_name: uname(e.user_id), location: l ? l.location : null, sku: l ? l.sku : null}; })
+  event_list: () => S.events.map(e => { const l = S.lines.find(x => x.id === e.line_id); return {...e, user_name: uname(e.user_id), location: l ? l.location : null, sku: l ? l.sku : null}; }),
+  qc_orders: () => S.qcOrders, qc_lines: () => S.qcLines, qc_order_list: qcList,
+  qc_line_v: () => S.qcLines.map(l => { const o = S.qcOrders.find(x => x.id === l.order_id) || {}; return {...l, short_qty: l.expected_qty - l.scanned_qty, order_no: o.order_no, reference: o.reference, storer: o.storer, customer: o.customer, order_status: o.status, order_created_at: o.created_at}; }),
+  qc_event_list: () => S.qcEvents.map(e => { const l = S.qcLines.find(x => x.id === e.line_id), o = S.qcOrders.find(x => x.id === e.order_id) || {}; return {...e, user_name: uname(e.user_id), sku: l ? l.sku : null, order_no: o.order_no}; })
 };
 
 /* ---------- query builder (the small part of supabase-js the apps use) ---------- */
@@ -101,6 +222,8 @@ function builder(table, me) {
     in(c, vs) { st.filters.push(r => vs.includes(r[c])); return api; },
     is(c, v) { st.filters.push(r => v === null ? r[c] == null : r[c] === v); return api; },
     not(c, op, v) { st.filters.push(r => op === "is" && v === null ? r[c] != null : r[c] !== v); return api; },
+    gte(c, v) { st.filters.push(r => r[c] != null && r[c] >= v); return api; },
+    lte(c, v) { st.filters.push(r => r[c] != null && r[c] <= v); return api; },
     ilike(c, p) { const re = like(p); st.filters.push(r => re.test(String(r[c] ?? ""))); return api; },
     or(expr) { const parts = expr.split(",").map(x => { const [c, op, ...rest] = x.split("."); const re = like(rest.join(".")); return r => op === "ilike" && re.test(String(r[c] ?? "")); }); st.filters.push(r => parts.some(f => f(r))); return api; },
     order(c, o) { st.order.push([c, !o || o.ascending !== false]); return api; },
@@ -196,6 +319,7 @@ function rpc(name, a, me) {
       if (t.lines_out) return E(`${t.lines_out} lines are still out of tolerance. Recount or accept them first.`);
       S.reconciliations.push({id: "r" + (S.reconciliations.length + 1), session_id: s.id, ...t, accuracy_pct: t.lines_counted ? Math.round(t.lines_within / t.lines_counted * 10000) / 100 : null, wms_reference: a.p_wms_reference, notes: a.p_notes, approved_by: me.id, approved_at: tick()});
       s.status = "reconciled"; ev(s.id, null, "reconcile", {note: a.p_wms_reference}); return {data: "r", error: null}; }
+    default: if (name.startsWith("qc_")) return qcRpc(name, a, me, staff);
   }
   return E("Unknown function " + name);
 }
@@ -271,7 +395,25 @@ onReady(() => {
   function render() {
     const s = window.__demoState ? window.__demoState() : {};
     let body = `<h4>Test scanner <span class="small muted" style="font-family:var(--sans);font-weight:400">demo</span></h4><p class="small muted" style="margin:6px 0 0">Tap a label to scan it, the way a handheld scanner would.</p>`;
-    if (!s.session) body += `<div class="sec"><b>START</b>Open the count "Weekly cycle count, Aisle A01".</div>`;
+    const qs = window.__qcDemo ? window.__qcDemo() : null;
+    const qbtn = (v, label, cls = "") => `<button class="code ${cls}" data-v="${h(v)}">${h(label)}<span>${h(v)}</span></button>`;
+    if (qs) {
+      if (qs.blocked) body += `<div class="sec"><b>STOPPED</b>The app is waiting for the operator to tap the red screen. Scans are ignored until then.</div>`;
+      else if (qs.view === "home" || qs.view === "passed" || qs.view === "sent") {
+        const open = (S.qcOrders || []).filter(o => ["pending", "short"].includes(o.status) || (o.status === "in_progress" && (!o.assigned_to || o.assigned_to === "u-ali"))).slice(0, 5);
+        body += `<div class="sec"><b>ORDER NUMBER ON THE PICK LIST</b>${open.map(o => qbtn(o.order_no, `${o.order_no} ${o.customer || ""}`)).join("") || '<span class="muted">No open orders. Upload some on the console.</span>'}</div>`;
+        const busy = (S.qcOrders || []).find(o => o.status === "in_progress" && o.assigned_to && o.assigned_to !== "u-ali");
+        const done = (S.qcOrders || []).find(o => o.status === "passed");
+        body += `<div class="sec"><b>THESE SHOULD BE REFUSED</b>${busy ? qbtn(busy.order_no, `${busy.order_no} (someone else is checking it)`, "warn") : ""}${done ? qbtn(done.order_no, `${done.order_no} (already passed)`, "warn") : ""}${qbtn("SO-9999999", "Order not uploaded", "bad")}</div>`;
+      } else if (qs.view === "tote") body += `<div class="sec"><b>TOTE LABELS</b>${qbtn("TOTE-0041", "Tote 0041")}${qbtn("TOTE-0042", "Tote 0042")}</div>`;
+      else if (qs.view === "scan" || qs.view === "short") {
+        const inOrder = new Set(qs.lines.map(l => String(l.barcode || l.sku).toUpperCase()));
+        body += `<div class="sec"><b>PRODUCTS IN THIS ORDER</b>${qs.lines.map(l => { const left = l.expected_qty - l.scanned_qty; return qbtn(l.barcode || l.sku, `${l.sku} · ${left > 0 ? left + " more needed" : "complete: one more is extra"}`, left > 0 ? "" : "warn"); }).join("")}</div>`;
+        const other = ["6291071800447", "6297000331189", "6291041500213", "6291056300715"].find(c => !inOrder.has(c)) || "6291999000017";
+        body += `<div class="sec"><b>SHOULD BE REFUSED</b>${qbtn(other, "Product from another order", "bad")}${qbtn("6291999000017", "Unknown barcode", "bad")}</div>`;
+        if (qs.order && qs.order.tote_mode !== "off") body += `<div class="sec"><b>TOTE LABEL</b><span class="small">Tap Change or Scan tote first.</span></div>`;
+      } else if (qs.view === "line") body += `<div class="sec"><b>NEXT</b>Choose a reason to remove a unit, or go back to scanning.</div>`;
+    } else if (!s.session) body += `<div class="sec"><b>START</b>Open the count "Weekly cycle count, Aisle A01".</div>`;
     else {
       const L = S.lines.filter(l => l.session_id === s.session), here = s.loc ? L.filter(l => l.location.toUpperCase() === s.loc.toUpperCase() && !l.is_found) : [];
       const codesHere = new Set(here.map(l => l.barcode)), rackCodes = new Set(L.filter(l => s.rack && l.location.toUpperCase().startsWith(s.rack)).map(l => l.barcode));
@@ -297,7 +439,7 @@ onReady(() => {
       else if (s.phase === "excess") body += `<div class="sec"><b>NEXT</b>Fill in the details. Expiry date is required for this count.</div>`;
       else body += `<div class="sec"><b>DONE</b>All locations are counted.</div>`;
     }
-    body += `<div class="sec"><label class="check small"><input type="checkbox" id="tsx-off" ${window.__ccOffline() ? "checked" : ""}> Simulate no network</label><span class="small muted">Counts wait on the phone and sync when you untick it.</span></div>`;
+    body += `<div class="sec"><label class="check small"><input type="checkbox" id="tsx-off" ${window.__ccOffline() ? "checked" : ""}> Simulate no network</label><span class="small muted">Counts and scans wait on the phone and sync when you untick it.</span></div>`;
     if (body !== last) { last = body; p.innerHTML = `<div class="tsx-body">${body}</div>`; }
   }
   p.addEventListener("click", e => {

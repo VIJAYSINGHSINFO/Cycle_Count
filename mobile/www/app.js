@@ -1,4 +1,4 @@
-/* Cycle Count (mobile, counting only). Works offline: counts queue on the device and sync when online. */
+/* Cycle Count mobile app: cycle counting and Order QC. Works offline: counts and scans queue on the device and sync when online. */
 (() => {
 "use strict";
 const $ = (s, r = document) => r.querySelector(s);
@@ -31,7 +31,7 @@ const idb = (() => {
 const M = {
   me: ls.get("cc-me"), sess: null, lines: [], byId: new Map(), locs: [], locIdx: new Map(), skuIdx: new Map(),
   cur: -1, confirmed: false, draft: new Map(), scanAdd: false, peers: new Map(),
-  outbox: [], syncing: false, lastSyncErr: null, maxUpdated: null, closed: false, channel: null, timers: []
+  outbox: [], syncing: false, lastSyncErr: null, maxUpdated: null, closed: false, channel: null, timers: [], mode: ls.get("cc-mode") === "qc" ? "qc" : "count"
 };
 let tT;
 function toast(msg, bad) { const t = $("#toast"); t.textContent = msg; t.className = "toast show" + (bad ? " bad" : ""); clearTimeout(tT); tT = setTimeout(() => t.className = "toast", bad ? 4500 : 2000); }
@@ -81,9 +81,13 @@ function syncBadge() {
 }
 function topbar(title, left = "", right = "") { return `<header class="top">${left}<span class="t">${esc(title)}</span>${syncBadge()}${right}</header>`; }
 function renderSync() { const s = $("#sync"); if (!s) return; s.outerHTML = syncBadge(); }
+function modeTabs(active) {
+  return `<div class="modes" role="tablist" aria-label="What are you doing?">${[["count", "Cycle count"], ["qc", "Order QC"]].map(([k, l]) => `<button role="tab" aria-selected="${active === k}" data-act="mode" data-m="${k}">${l}</button>`).join("")}</div>`;
+}
 async function renderSessions() {
   leaveSession();
-  $("#root").innerHTML = topbar("Choose a count", "", `<button data-act="signout">Sign out</button>`) + `<div class="wrap"><p class="small muted">Signed in as ${esc(M.me.full_name)}</p><div class="sess" id="sess"><div class="loading">Loading counts…</div></div></div>`;
+  if (M.mode === "qc" && window.CCQC) return window.CCQC.home();
+  $("#root").innerHTML = topbar("Choose a count", "", `<button data-act="signout">Sign out</button>`) + `<div class="wrap">${modeTabs("count")}<p class="small muted">Signed in as ${esc(M.me.full_name)}</p><div class="sess" id="sess"><div class="loading">Loading counts…</div></div></div>`;
   let rows = null;
   try { const r = await sb.rpc("mobile_sessions"); if (r.error) throw r.error; rows = r.data; idb.set("sessions", rows); } catch { rows = await idb.get("sessions").catch(() => null); if (rows) toast("Offline: showing saved counts"); }
   const box = $("#sess"); if (!box) return;
@@ -110,7 +114,7 @@ function rebuild() {
   M.locIdx = new Map(M.locs.map((L, i) => [L.key, i]));
 }
 let cacheT;
-function saveCache() { clearTimeout(cacheT); cacheT = setTimeout(() => idb.set("lines:" + M.sess.id, {lines: M.lines.filter(l => l.id > 0), maxUpdated: M.maxUpdated, at: Date.now()}).catch(() => {}), 1500); }
+function saveCache() { if (!M.sess || M.mode === "qc") return; const sid = M.sess.id; clearTimeout(cacheT); cacheT = setTimeout(() => idb.set("lines:" + sid, {lines: M.lines.filter(l => l.id > 0), maxUpdated: M.maxUpdated, at: Date.now()}).catch(() => {}), 1500); }
 async function fetchPages(since, onPage) {
   let after = 0, total = 0;
   for (;;) {
@@ -301,6 +305,7 @@ let actx;
 function beep() { try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); const o = actx.createOscillator(), g = actx.createGain(); o.frequency.value = 220; g.gain.value = .08; o.connect(g); g.connect(actx.destination); o.start(); o.stop(actx.currentTime + .18); } catch {} }
 
 function handleScan(v) {
+  if (!M.sess || !$("#stage")) { toast("Open a count first, then scan.", true); return; }
   if (M.closed) return;
   const k = v.toUpperCase(); M.err = null;
   const li = M.locIdx.get(k);
@@ -462,12 +467,22 @@ async function flush() {
       if (error) { if (isServerError(error)) { await markFailed([o], error.message); continue; } throw error; }
       await removeOut([o.client_id]);
     }
+    const qcBy = new Map();
+    todo.filter(o => o.kind === "qc").sort((a, b) => a.seq - b.seq).forEach(o => { if (!qcBy.has(o.order_id)) qcBy.set(o.order_id, []); qcBy.get(o.order_id).push(o); });
+    for (const [oid, list] of qcBy) for (let i = 0; i < list.length; i += 200) {
+      const part = list.slice(i, i + 200);
+      const {error} = await sb.rpc("qc_submit", {p_order: oid, p_entries: part.map(o => ({...o.entry, client_id: o.client_id})), p_device: DEVICE});
+      if (error) { if (isServerError(error)) { await markFailed(list.slice(i), error.message); break; } throw error; }
+      await removeOut(part.map(o => o.client_id));
+    }
+    if (qcBy.size && window.CCQC) window.CCQC.onSynced();
     M.lastSyncErr = null;
   } catch (e) { M.lastSyncErr = e; }
   finally { M.syncing = false; renderSync(); }
 }
+async function flushNow() { for (let i = 0; i < 100 && M.syncing; i++) await new Promise(r => setTimeout(r, 100)); await flush(); }
 async function removeOut(ids) { const set = new Set(ids); M.outbox = M.outbox.filter(o => !set.has(o.client_id)); await idb.outDel(ids).catch(() => {}); }
-async function markFailed(list, msg) { for (const o of list) { o.failed = true; o.error = msg; await idb.outPut(o).catch(() => {}); } toast(`Some counts could not be saved: ${msg}`, true); }
+async function markFailed(list, msg) { for (const o of list) { o.failed = true; o.error = msg; await idb.outPut(o).catch(() => {}); } toast(`Some entries could not be saved: ${msg}`, true); if (window.CCQC) window.CCQC.onSynced(); }
 function showFailed() {
   const f = M.outbox.filter(o => o.failed); if (!f.length) return;
   const d = document.createElement("div");
@@ -480,6 +495,7 @@ setInterval(flush, 5000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { flush(); pull(); } });
 
 /* ---------- camera scanning ---------- */
+function dispatchScan(v) { if (!v) return; if (M.mode === "qc" && window.CCQC) window.CCQC.scan(v); else handleScan(v); }
 function nativeScanner() { const c = window.Capacitor; return c && c.isNativePlatform && c.isNativePlatform() && c.Plugins && c.Plugins.BarcodeScanner ? c.Plugins.BarcodeScanner : null; }
 const cameraAvailable = () => !!nativeScanner() || "BarcodeDetector" in window;
 async function cameraScan() {
@@ -488,7 +504,7 @@ async function cameraScan() {
     try {
       if (BS.isGoogleBarcodeScannerModuleAvailable) { const a = await BS.isGoogleBarcodeScannerModuleAvailable(); if (!a.available) { await BS.installGoogleBarcodeScannerModule(); toast("Installing the scanner. Try again in a moment."); return; } }
       const {barcodes} = await BS.scan();
-      if (barcodes && barcodes[0]) handleScan(String(barcodes[0].rawValue || barcodes[0].displayValue || "").trim());
+      if (barcodes && barcodes[0]) dispatchScan(String(barcodes[0].rawValue || barcodes[0].displayValue || "").trim());
     } catch (e) { if (!/cancel/i.test(e && e.message || "")) toast("Camera scan failed. Type the code instead.", true); }
     return;
   }
@@ -504,7 +520,7 @@ async function cameraScan() {
     stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: "environment"}});
     video.srcObject = stream; await video.play();
     const det = new BarcodeDetector();
-    const loop = async () => { if (stop) return; try { const r = await det.detect(video); if (r[0]) { close(); handleScan(r[0].rawValue.trim()); return; } } catch {} requestAnimationFrame(loop); };
+    const loop = async () => { if (stop) return; try { const r = await det.detect(video); if (r[0]) { close(); dispatchScan(r[0].rawValue.trim()); return; } } catch {} requestAnimationFrame(loop); };
     loop();
   } catch { close(); toast("Camera not available. Type the code instead.", true); }
 }
@@ -523,6 +539,7 @@ document.addEventListener("click", async e => {
     case "to-signup": renderLogin("up"); break;
     case "to-signin": renderLogin("in"); break;
     case "reload-sessions": renderSessions(); break;
+    case "mode": M.mode = b.dataset.m === "qc" ? "qc" : "count"; ls.set("cc-mode", M.mode); renderSessions(); break;
     case "open": openSession(b.dataset.id).then(showFailed); break;
     case "back": renderSessions(); break;
     case "goto": newVisit(+b.dataset.li, false); renderStage(); announce(); break;
@@ -545,15 +562,16 @@ document.addEventListener("click", async e => {
     case "excess-manual": openExcess({reason: "For an item without a readable barcode."}); break;
     case "save-excess": saveExcess(); break;
     case "camera": cameraScan(); break;
-    case "retry-failed": for (const o of M.outbox) if (o.failed) { o.failed = false; await idb.outPut(o).catch(() => {}); } b.closest(".banner").remove(); flush(); break;
-    case "discard-failed": if (confirmTwice(b, "disc", "Tap again to discard")) { await removeOut(M.outbox.filter(o => o.failed).map(o => o.client_id)); b.closest(".banner").remove(); renderSync(); } break;
+    case "retry-failed": for (const o of M.outbox) if (o.failed) { o.failed = false; o.error = null; await idb.outPut(o).catch(() => {}); } b.closest(".banner").remove(); flush().then(() => { if (M.mode === "qc" && window.CCQC) window.CCQC.render(); }); break;
+    case "discard-failed": if (confirmTwice(b, "disc", "Tap again to discard")) { await removeOut(M.outbox.filter(o => o.failed).map(o => o.client_id)); b.closest(".banner").remove(); renderSync(); if (M.mode === "qc" && window.CCQC) window.CCQC.render(); } break;
   }
 });
 
 if (CONFIG.DEMO) {   // hooks for the preview page's test barcodes
-  window.__demoScan = v => handleScan(v);
+  window.__demoScan = v => dispatchScan(v);
   window.__demoState = () => ({phase: M.phase, loc: M.sess && M.locs[M.cur] ? M.locs[M.cur].loc : null, rack: M.sess && M.locs[M.cur] ? M.locs[M.cur].rack : null, session: M.sess ? M.sess.id : null});
 }
+if (window.CCQC) window.CCQC.init({sb, M, esc, fmt, uuid, ls, idb, toast, vibrate, isOnline, isServerError, DEVICE, topbar, modeTabs, leaveSession, queue, flushNow, confirmTwice, cameraAvailable, CAM_ICON});
 if ("serviceWorker" in navigator && platform === "web" && !CONFIG.DEMO) navigator.serviceWorker.register("sw.js").catch(() => {});
 boot();
 })();
