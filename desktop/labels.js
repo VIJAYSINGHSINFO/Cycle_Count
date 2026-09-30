@@ -1,4 +1,4 @@
-/* Cycle Count Console: barcode labels. Upload a CSV/Excel file (or use a count's locations or products),
+/* Stowra console: barcode labels. Upload a CSV/Excel file (or use a count's locations or products),
    choose a label style and paper layout, preview, and print on A4 or A5. */
 (() => {
 "use strict";

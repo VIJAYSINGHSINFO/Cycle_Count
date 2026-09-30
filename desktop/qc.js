@@ -1,4 +1,4 @@
-/* Cycle Count Console: Order QC. Upload picked orders, watch operators check them on the phone,
+/* Stowra console: Order QC. Upload picked orders, watch operators check them on the phone,
    handle short orders (release with a reason, or wait for the extra pick), and export the results. */
 (() => {
 "use strict";

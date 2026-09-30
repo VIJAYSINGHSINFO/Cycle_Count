@@ -362,7 +362,7 @@ onReady(() => {
   const b = document.createElement("div");
   b.innerHTML = "Demo mode: sample data. Nothing is saved, and reloading resets it." + (C.DEMO_FROM_DEVICE ? ' <a href="#" id="cc-exit-demo" style="color:inherit;margin-left:8px">Exit demo</a>' : "");
   b.addEventListener("click", e => { if (e.target.id === "cc-exit-demo") { e.preventDefault(); window.CC_resetConnection && window.CC_resetConnection(); } });
-  b.style.cssText = "background:#F2A900;color:#161100;font:600 12px/1.2 system-ui,sans-serif;padding:5px 12px;text-align:center;position:relative;z-index:30";
+  b.style.cssText = "background:#13233F;color:#FFFFFF;font:600 12px/1.2 system-ui,sans-serif;padding:5px 12px;text-align:center;position:relative;z-index:30";
   document.body.prepend(b);
 });
 })();

@@ -15,7 +15,7 @@ window.CC_showSetup = () => {
   const root = document.getElementById("root");
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   root.innerHTML = `<div class="auth"><form class="panel" id="cc-setup" style="max-width:460px" novalidate>
-    <div class="brand-big"><svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#17202B"/><rect x="10" y="17" width="44" height="30" rx="4" fill="#F2A900"/><g fill="#161100"><rect x="15" y="22" width="2.6" height="20"/><rect x="19.4" y="22" width="1.3" height="20"/><rect x="22.4" y="22" width="3.4" height="20"/><rect x="27.6" y="22" width="1.3" height="20"/><rect x="30.6" y="22" width="2.4" height="20"/></g><path d="M37.5 32.5l4.2 4.3 8.3-9" fill="none" stroke="#161100" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Cycle Count</div>
+    <div class="brand-big"><svg class="mark" viewBox="-6 -6 76 76" aria-hidden="true"><path d="M0 0H64V16.7H16.7V32H0Z" fill="#13233F"/><path d="M64 64H0V47.3H47.3V32H64Z" fill="#1FA38A"/><rect x="23.4" y="23.4" width="17.2" height="17.2" rx="2.6" fill="#F2A33A"/></svg><span>stowra</span></div>
     <h2 style="margin-bottom:6px">Connect to your database</h2>
     <p class="hint">In Supabase, open <strong>Project Settings &gt; API</strong> and copy the Project URL and the <strong>anon public</strong> (or <strong>publishable</strong>) key. They're saved on this device only.</p>
     <label class="field" style="margin-bottom:10px">Project URL<input name="url" type="url" placeholder="https://abcdefgh.supabase.co" autocomplete="off" spellcheck="false" value="${esc(C.FROM_DEVICE ? C.SUPABASE_URL : "")}"></label>

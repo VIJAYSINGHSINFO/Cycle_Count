@@ -1,4 +1,6 @@
-# Cycle Count Suite
+# Stowra
+
+*Every pallet, perfectly placed.* Warehouse platform by RSA Global: Order QC, cycle counting and barcode labels. Logo files are in `brand/` (navy #13233F, teal #1FA38A, amber #F2A33A). The apps use a light white-and-navy look.
 
 > **Setting it up for real?** Follow `docs/SETUP-GUIDE.md`. It creates your database, a website for the console and mobile app, and the Android APK, using GitHub to build everything, so no Android Studio is needed. The steps below describe the same pieces for technical readers.
 

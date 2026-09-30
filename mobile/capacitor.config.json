@@ -1,11 +1,11 @@
 {
   "appId": "com.yourcompany.cyclecount",
-  "appName": "Cycle Count",
+  "appName": "Stowra",
   "webDir": "www",
   "android": {
     "allowMixedContent": false
   },
   "plugins": {
-    "SplashScreen": { "launchShowDuration": 0 }
+    "SplashScreen": { "launchShowDuration": 0, "backgroundColor": "#FFFFFF" }
   }
 }

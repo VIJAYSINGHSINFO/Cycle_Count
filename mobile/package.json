@@ -2,7 +2,7 @@
   "name": "cycle-count-mobile",
   "version": "1.0.0",
   "private": true,
-  "description": "Cycle Count mobile app (Android) built with Capacitor",
+  "description": "Stowra mobile app (Android) built with Capacitor",
   "scripts": {
     "android:add": "cap add android && node scripts/patch-android.js",
     "android:sync": "cap sync android",

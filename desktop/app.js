@@ -1,4 +1,4 @@
-/* Cycle Count Console (desktop, full access) */
+/* Stowra console (desktop, full access) */
 (() => {
 "use strict";
 const $ = (s, r = document) => r.querySelector(s);
@@ -10,7 +10,7 @@ const dt = s => s ? new Date(s).toLocaleString(undefined, {dateStyle: "medium", 
 const d8 = s => s ? new Date(s).toLocaleDateString(undefined, {dateStyle: "medium"}) : "–";
 const COLL = new Intl.Collator(undefined, {numeric: true, sensitivity: "base"});
 const STATUS_LABEL = {match: "Match", within: "Within tolerance", out: "Out of tolerance", accepted: "Accepted", uncounted: "Not counted", recount: "Recount"};
-const MARK = `<svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#17202B"/><rect x="10" y="17" width="44" height="30" rx="4" fill="#F2A900"/><g fill="#161100"><rect x="15" y="22" width="2.6" height="20"/><rect x="19.4" y="22" width="1.3" height="20"/><rect x="22.4" y="22" width="3.4" height="20"/><rect x="27.6" y="22" width="1.3" height="20"/><rect x="30.6" y="22" width="2.4" height="20"/></g><path d="M37.5 32.5l4.2 4.3 8.3-9" fill="none" stroke="#161100" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const MARK = `<svg class="mark" viewBox="-6 -6 76 76" aria-hidden="true"><path d="M0 0H64V16.7H16.7V32H0Z" fill="#13233F"/><path d="M64 64H0V47.3H47.3V32H64Z" fill="#1FA38A"/><rect x="23.4" y="23.4" width="17.2" height="17.2" rx="2.6" fill="#F2A33A"/></svg>`, MARK_NAVY = `<svg class="mark" viewBox="-6 -6 76 76" aria-hidden="true"><path d="M0 0H64V16.7H16.7V32H0Z" fill="#F5F3EE"/><path d="M64 64H0V47.3H47.3V32H64Z" fill="#1FA38A"/><rect x="23.4" y="23.4" width="17.2" height="17.2" rx="2.6" fill="#F2A33A"/></svg>`;
 const SESSION_LABEL = {draft: "Draft", open: "Counting", closed: "Closed", reconciled: "Reconciled"};
 
 if (!CONFIG.DEMO && CONFIG.isPlaceholder()) { window.CC_showSetup(); return; }
@@ -36,7 +36,7 @@ async function boot() {
   if (!session) return renderLogin();
   try { const rows = await q(sb.rpc("whoami")); S.me = rows && rows[0]; } catch (e) { S.me = null; }
   if (!S.me || !S.me.active) return renderMessage("Waiting for approval", `Your account (${esc(session.user.email)}) was created. An administrator needs to approve it and assign a role before you can sign in.`);
-  if (S.me.role === "counter") return renderMessage("Use the mobile app", "This console is for supervisors and administrators. Operators count stock and check orders in the Cycle Count mobile app.");
+  if (S.me.role === "counter") return renderMessage("Use the mobile app", "This console is for supervisors and administrators. Operators count stock and check orders in the Stowra mobile app.");
   renderShell();
 }
 sb.auth.onAuthStateChange((ev, session) => {   // react only when the signed-in user actually changes
@@ -44,11 +44,11 @@ sb.auth.onAuthStateChange((ev, session) => {   // react only when the signed-in 
   if (uid !== S.uid) { S.uid = uid; setTimeout(boot, 0); }
 });
 function renderMessage(title, body) {
-  $("#root").innerHTML = `<div class="auth"><div class="panel"><div class="brand-big">${MARK}Cycle Count</div><h2>${esc(title)}</h2><p>${body}</p><button class="btn" data-act="signout">Sign out</button></div></div>`;
+  $("#root").innerHTML = `<div class="auth"><div class="panel"><div class="brand-big">${MARK}<span>stowra<small>Warehouse console</small></span></div><h2>${esc(title)}</h2><p>${body}</p><button class="btn" data-act="signout">Sign out</button></div></div>`;
 }
 function renderLogin(mode = "in") {
   $("#root").innerHTML = `<div class="auth"><form class="panel" id="authf">
-    <div class="brand-big">${MARK}Cycle Count Console</div>
+    <div class="brand-big">${MARK}<span>stowra<small>Warehouse console</small></span></div>
     <h2 style="margin-bottom:14px">${mode === "in" ? "Sign in" : "Create an account"}</h2>
     ${mode === "up" ? `<label class="field" style="margin-bottom:10px">Full name<input name="full_name" required autocomplete="name"></label>` : ""}
     <label class="field" style="margin-bottom:10px">Email<input name="email" type="email" required autocomplete="email"></label>
@@ -76,7 +76,7 @@ function renderLogin(mode = "in") {
 function renderShell() {
   $("#root").innerHTML = `<div class="shell">
     <nav class="side" aria-label="Main">
-      <div class="brand">${MARK}Cycle Count</div>
+      <div class="brand">${MARK_NAVY}<span class="wordmark">stowra</span></div>
       <a href="#/counts" data-nav="counts">Counts</a>
       <a href="#/history" data-nav="history">Reconciliation history</a>
       <a href="#/items" data-nav="items">Item history</a>

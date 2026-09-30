@@ -28,7 +28,7 @@ For Play, it's also recommended to enrol in **Play App Signing** when you upload
 
 ## Route A: private app
 
-1. In Play Console, create the app: name "Cycle Count", type App, Free.
+1. In Play Console, create the app: name "Stowra", type App, Free.
 2. In **Advanced settings > Managed Google Play**, turn on **Private app** and add your organisation's Managed Google Play ID. Your device management admin can find this ID.
 3. Complete the required sections (App content, Data safety). They are short for a private app.
 4. Upload the .aab to **Production** and roll it out.

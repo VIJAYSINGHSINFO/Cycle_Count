@@ -77,3 +77,12 @@ dialog::backdrop{background:rgba(10,14,20,.45)}
 .lb-hollow{color:#fff;-webkit-text-stroke-color:#000;-webkit-text-stroke-style:solid;paint-order:stroke fill;font-family:Arial,"Helvetica Neue",sans-serif;text-shadow:.25mm .25mm 0 #bbb;justify-content:center}
 .lb-partbox{margin-top:12px;border-top:1px solid var(--line);padding-top:10px}
 .lb-partbox summary{cursor:pointer}
+
+/* Stowra: navy sidebar, white pages */
+.side{background:var(--navy);color:#fff}
+.side a[aria-current="page"]{background:rgba(255,255,255,.14);box-shadow:inset 3px 0 0 #fff}
+.side .brand{gap:10px}
+.side .brand .mark{width:30px;height:30px}
+.side .brand .wordmark{font-size:1.65rem;color:#fff}
+.stat{box-shadow:0 1px 0 rgba(19,35,63,.04)}
+.pill.open{background:#E7EDF7;color:var(--navy)}

@@ -1,4 +1,4 @@
-/* Cycle Count test link: one page that runs either app and keeps the demo data in a shared test database,
+/* Stowra test link: one page that runs either app and keeps the demo data in a shared test database,
    so a count uploaded on the laptop can be counted on a phone. */
 (async () => {
 "use strict";
@@ -22,7 +22,7 @@ if (choice === "desktop" || choice === "mobile") start(choice); else chooser();
 function chooser() {
   const phone = matchMedia("(max-width: 700px)").matches;
   $("#root").innerHTML = `<div class="auth"><div class="panel" style="max-width:480px">
-    <div class="brand-big">${P.mark}Cycle Count test</div>
+    <div class="brand-big">${P.mark}<span>stowra<small>Test link</small></span></div>
     <p>This test link shares one database between your laptop and your phone.</p>
     <ol class="steps"><li><strong>On your laptop</strong>, open the console, create a count, upload your stock file and click <em>Open for counting</em>.</li>
       <li><strong>On your phone</strong>, open this same link in the Claude app or your phone's browser (signed in to Claude) and choose the mobile app.</li></ol>

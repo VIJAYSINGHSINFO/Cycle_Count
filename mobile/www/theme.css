@@ -1,19 +1,17 @@
-/* Cycle Count Suite: shared theme (copied into desktop/ and mobile/www/) */
+/* Stowra: shared theme (copied into desktop/ and mobile/www/). Light only. */
 :root{
-  --bg:#E4E7EB; --surface:#FFFFFF; --surface-2:#F2F4F6; --ink:#17202B; --muted:#5A6473; --line:#C8CDD5;
-  --amber:#F2A900; --amber-ink:#161100; --ok:#2B7A4B; --ok-bg:#E2F0E7; --warn:#9A6414; --warn-bg:#FAEFD6;
-  --bad:#B8361F; --bad-bg:#F7E0DA; --focus:#1F6FEB;
+  /* Stowra: light pages in white and navy. Green, amber and red are kept only for status (match, warning, error). */
+  --bg:#F5F7FA; --surface:#FFFFFF; --surface-2:#EEF2F7; --ink:#13233F; --muted:#5B6A80; --line:#D6DDE7;
+  --navy:#13233F; --navy-2:#223A63; --on-navy:#FFFFFF;
+  --amber:#13233F; --amber-ink:#FFFFFF;   /* accent slots now use navy */
+  --ok:#1E7A55; --ok-bg:#E3F3EC; --warn:#8A5A0B; --warn-bg:#FBF0DA;
+  --bad:#B3321C; --bad-bg:#F9E3DE; --focus:#2F6FDB;
   --cond:"Barlow Condensed","Arial Narrow","Roboto Condensed",sans-serif;
   --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --brand:"Sora","IBM Plex Sans",system-ui,sans-serif;
   box-sizing:border-box; color-scheme:light;
   padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
 }
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
-  --bg:#101419; --surface:#1A2028; --surface-2:#222A34; --ink:#E6EAF0; --muted:#98A2B1; --line:#303A46;
-  --ok:#62C48F; --ok-bg:#15301F; --warn:#E2B04F; --warn-bg:#332611; --bad:#F2806A; --bad-bg:#3A1C16; --focus:#6FA8FF; color-scheme:dark}}
-:root[data-theme="dark"]{
-  --bg:#101419; --surface:#1A2028; --surface-2:#222A34; --ink:#E6EAF0; --muted:#98A2B1; --line:#303A46;
-  --ok:#62C48F; --ok-bg:#15301F; --warn:#E2B04F; --warn-bg:#332611; --bad:#F2806A; --bad-bg:#3A1C16; --focus:#6FA8FF; color-scheme:dark}
 html{scroll-padding-top:env(safe-area-inset-top,0px)}
 *,*::before,*::after{box-sizing:inherit}
 body{margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.5 var(--sans);-webkit-font-smoothing:antialiased}
@@ -103,3 +101,17 @@ tr:last-child td{border-bottom:0}
 fieldset.opts{border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:12px 0 0;min-width:0}
 fieldset.opts legend{font:600 1rem/1 var(--cond);padding:0 6px;color:var(--ink)}
 fieldset.opts select{max-width:100%}
+
+/* Stowra brand */
+.wordmark{font:700 1.5rem/1 var(--brand);letter-spacing:-.02em;text-transform:lowercase}
+.auth .brand-big{font-family:var(--brand);letter-spacing:-.02em}
+.auth .brand-big small{display:block;font:500 .85rem/1.2 var(--sans);letter-spacing:0;color:var(--muted);margin-top:4px}
+.btn.go{background:var(--navy);color:var(--on-navy);border-color:var(--navy)}
+.btn.go:hover{background:var(--navy-2)}
+.btn.primary{background:var(--navy);border-color:var(--navy);color:var(--on-navy)}
+.progress b{background:var(--navy)}
+.bigprog b{background:var(--navy)}
+.chip[aria-pressed="true"]{background:var(--navy);color:var(--on-navy);border-color:var(--navy)}
+.tag{background:var(--surface-2);color:var(--navy);border:1px solid var(--line)}
+th{background:var(--surface-2);color:var(--navy)}
+.auth a{color:var(--navy);text-underline-offset:3px}

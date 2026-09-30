@@ -1,4 +1,4 @@
-# Setup guide: your own Cycle Count system
+# Setup guide: your own Stowra system
 
 At the end of this guide you'll have:
 
@@ -66,7 +66,7 @@ No Claude account is needed by anyone who uses the apps. You need two free accou
 ## Part 4: Build everything (10 minutes, mostly waiting)
 
 1. Open the **Actions** tab. If GitHub asks, click **I understand my workflows, go ahead and enable them**.
-2. Click **Build Cycle Count** on the left, then **Run workflow > Run workflow**.
+2. Click **Build Stowra** on the left, then **Run workflow > Run workflow**.
 3. Wait for both jobs, **website** and **android**, to turn green. The Android build takes about 5–8 minutes.
 4. **Your website:** click the finished run, then the link under **website**. It looks like `https://yourname.github.io/cycle-count/`. The start page has:
    - **Open the console** for laptops.
@@ -87,7 +87,7 @@ From now on, **every change you upload to the repository rebuilds both automatic
 
 ## Part 6: Install on devices
 
-**Desktop app (Windows or Mac):** open the console link in Chrome or Edge and click the **Install** icon at the right end of the address bar. Cycle Count then opens in its own window from the Start menu or desktop, like a normal program.
+**Desktop app (Windows or Mac):** open the console link in Chrome or Edge and click the **Install** icon at the right end of the address bar. Stowra then opens in its own window from the Start menu or desktop, like a normal program.
 
 **Phones, quickest way:** scan the QR code on the start page, open the link in Chrome, and use **menu > Add to Home screen**.
 

@@ -1,4 +1,4 @@
-/* Cycle Count mobile app: cycle counting and Order QC. Works offline: counts and scans queue on the device and sync when online. */
+/* Stowra mobile app: cycle counting and Order QC. Works offline: counts and scans queue on the device and sync when online. */
 (() => {
 "use strict";
 const $ = (s, r = document) => r.querySelector(s);
@@ -51,11 +51,11 @@ async function boot() {
 }
 sb.auth.onAuthStateChange((ev, session) => { const uid = session && session.user ? session.user.id : null; if (uid !== M.uid) { M.uid = uid; setTimeout(boot, 0); } });
 function renderMessage(title, body, withSignOut) {
-  $("#root").innerHTML = `<div class="auth"><div class="panel"><div class="brand-big"><svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#17202B"/><rect x="10" y="17" width="44" height="30" rx="4" fill="#F2A900"/><g fill="#161100"><rect x="15" y="22" width="2.6" height="20"/><rect x="19.4" y="22" width="1.3" height="20"/><rect x="22.4" y="22" width="3.4" height="20"/><rect x="27.6" y="22" width="1.3" height="20"/><rect x="30.6" y="22" width="2.4" height="20"/></g><path d="M37.5 32.5l4.2 4.3 8.3-9" fill="none" stroke="#161100" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Cycle Count</div><h2>${esc(title)}</h2><p>${esc(body)}</p><div class="row"><button class="btn primary" data-act="retry">Try again</button>${withSignOut ? `<button class="btn" data-act="signout">Sign out</button>` : ""}</div></div></div>`;
+  $("#root").innerHTML = `<div class="auth"><div class="panel"><div class="brand-big"><svg class="mark" viewBox="-6 -6 76 76" aria-hidden="true"><path d="M0 0H64V16.7H16.7V32H0Z" fill="#13233F"/><path d="M64 64H0V47.3H47.3V32H64Z" fill="#1FA38A"/><rect x="23.4" y="23.4" width="17.2" height="17.2" rx="2.6" fill="#F2A33A"/></svg><span>stowra</span></div><h2>${esc(title)}</h2><p>${esc(body)}</p><div class="row"><button class="btn primary" data-act="retry">Try again</button>${withSignOut ? `<button class="btn" data-act="signout">Sign out</button>` : ""}</div></div></div>`;
 }
 function renderLogin(mode = "in") {
   $("#root").innerHTML = `<div class="auth"><form class="panel" id="authf">
-    <div class="brand-big"><svg class="mark" viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#17202B"/><rect x="10" y="17" width="44" height="30" rx="4" fill="#F2A900"/><g fill="#161100"><rect x="15" y="22" width="2.6" height="20"/><rect x="19.4" y="22" width="1.3" height="20"/><rect x="22.4" y="22" width="3.4" height="20"/><rect x="27.6" y="22" width="1.3" height="20"/><rect x="30.6" y="22" width="2.4" height="20"/></g><path d="M37.5 32.5l4.2 4.3 8.3-9" fill="none" stroke="#161100" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Cycle Count</div>
+    <div class="brand-big"><svg class="mark" viewBox="-6 -6 76 76" aria-hidden="true"><path d="M0 0H64V16.7H16.7V32H0Z" fill="#13233F"/><path d="M64 64H0V47.3H47.3V32H64Z" fill="#1FA38A"/><rect x="23.4" y="23.4" width="17.2" height="17.2" rx="2.6" fill="#F2A33A"/></svg><span>stowra</span></div>
     ${mode === "up" ? `<label class="field" style="margin-bottom:10px">Full name<input name="full_name" required autocomplete="name"></label>` : ""}
     <label class="field" style="margin-bottom:10px">Email<input name="email" type="email" required autocomplete="email" inputmode="email"></label>
     <label class="field" style="margin-bottom:16px">Password<input name="password" type="password" required minlength="8"></label>

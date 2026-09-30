@@ -1,7 +1,7 @@
 # Builds everything whenever you change the code, or when you click "Run workflow" on the Actions tab:
 #  - the website (console + mobile web app) on GitHub Pages
 #  - the Android app (APK), downloadable from the run's Artifacts section
-name: Build Cycle Count
+name: Build Stowra
 
 on:
   push:
@@ -95,7 +95,7 @@ jobs:
           fi
       - uses: actions/upload-artifact@v4
         with:
-          name: cycle-count-android
+          name: stowra-android
           path: |
             mobile/android/app/build/outputs/apk/**/*.apk
             mobile/android/app/build/outputs/bundle/**/*.aab
