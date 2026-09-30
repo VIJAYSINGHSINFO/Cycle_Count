@@ -78,6 +78,7 @@ async function start(app) {
   S.evPrefix = "d" + Math.random().toString(36).slice(2, 7) + "-";
   S.evId = 0;
   if (app === "mobile") { let n = 0; const base = 1e9 + (Date.now() % 1e7) * 50; S.nextExcessId = () => base + (n++); }
+  if (P[app].lib) runScript(P[app].lib);
   runScript(P[app].js);
   addFloating(app);
   if (db) startSync(S, sent, known, linesSent);

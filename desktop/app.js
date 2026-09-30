@@ -80,6 +80,7 @@ function renderShell() {
       <a href="#/counts" data-nav="counts">Counts</a>
       <a href="#/history" data-nav="history">Reconciliation history</a>
       <a href="#/items" data-nav="items">Item history</a>
+      <a href="#/labels" data-nav="labels">Barcode labels</a>
       ${S.me.role === "admin" ? `<a href="#/users" data-nav="users">Users</a>` : ""}
       <div class="me">${esc(S.me.full_name)}<br><span style="opacity:.7">${S.me.role === "admin" ? "Administrator" : "Supervisor"}</span><br><button data-act="signout">Sign out</button></div>
     </nav>
@@ -92,7 +93,7 @@ function onRoute() {
   const [page, id, tab] = route();
   $$(".side a").forEach(a => a.setAttribute("aria-current", a.dataset.nav === page ? "page" : "false"));
   const m = $("#main"); m.innerHTML = `<div class="loading">Loading…</div>`;
-  ({counts: pageCounts, count: () => pageCount(id, tab || "overview"), history: pageHistory, items: pageItems, users: pageUsers}[page] || pageCounts)();
+  ({counts: pageCounts, count: () => pageCount(id, tab || "overview"), history: pageHistory, items: pageItems, labels: () => window.CCLabels.page($("#main"), {sb, q, toast, parseDelimited}), users: pageUsers}[page] || pageCounts)();
 }
 
 /* ---------- counts list ---------- */

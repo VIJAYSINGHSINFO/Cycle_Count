@@ -131,6 +131,23 @@ The APK from Part 4 is a *debug* build. It's fine for testing and for installing
 2. **Phones:** counters sign in, pick the count, go to the suggested location, scan the location label, and scan each product.
 3. **Console:** open **Variances**, recount or accept, **Close count**, then **Reconcile** with your WMS adjustment reference. The count is saved permanently in **Reconciliation history**.
 
+## Printing barcode labels
+
+1. In the console, open **Barcode labels**.
+2. **Choose the data.** Upload a CSV or Excel file with one row per label (see `docs/label-file-template.csv`), load the locations or products of a count, or type the codes.
+   - Only the **Barcode value** column is required.
+   - Repeated rows are skipped, so a stock file with many SKUs per location still gives one label per location.
+   - A barcode at the start of a description (`9345156233829-Hair brush`) is split out automatically.
+3. **Pick a style:**
+   - **Location label:** a large location code with a barcode and an optional arrow.
+   - **Rack levels:** one label per rack, with a row and barcode for each level (A, B, C…).
+   - **Product label:** SKU, description and barcode. EAN-13 is used automatically when the barcode is valid.
+   - **QR label:** a QR or Data Matrix code with text, for small bins.
+4. **Choose the paper:** A4 or A5, portrait or landscape, and labels per sheet (1 up to 40, or custom rows and columns). The screen shows each label's size in mm. For label sheets, set the page margin and gap to match the sheet.
+5. Click **Print labels**. In the print window set **Scale: 100% / Actual size**, **Margins: None**, and turn off **Headers and footers**. To keep a file instead, choose **Save as PDF** as the printer.
+   - **Start at label position** lets you reuse a partly used label sheet.
+   - If a code can't be encoded in the chosen barcode type (for example letters in EAN-13), or the bars would be too thin to scan, the console lists it before printing.
+
 ## Something not working?
 
 | Problem | Fix |
