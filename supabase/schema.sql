@@ -94,6 +94,10 @@ alter table public.count_sessions add column if not exists excess_mfg    text no
 alter table public.count_sessions add column if not exists excess_expiry text not null default 'required';
 alter table public.count_sessions drop constraint if exists count_sessions_rack_grouping_check;
 alter table public.count_sessions add constraint count_sessions_rack_grouping_check check (rack_grouping in ('none', 'last_segment', 'last_char'));
+-- Version 4: a recount must be done by a different person than the first count (optional per count)
+alter table public.count_sessions add column if not exists recount_other boolean not null default false;
+-- Version 4: if the entered quantity differs from the system by more than this %, the phone asks for it again (0 = off)
+alter table public.count_sessions add column if not exists recheck_pct numeric(6,2) not null default 5;
 create index if not exists count_sessions_status_idx on public.count_sessions (status, created_at desc);
 
 -- ---------------------------------------------------------------------
@@ -134,6 +138,15 @@ alter table public.count_lines add column if not exists expiry_date date;
 alter table public.count_lines add column if not exists expected_location text;
 alter table public.count_lines add column if not exists remarks text;
 alter table public.count_lines add column if not exists units_per_case numeric(14,3) not null default 1;
+-- Version 4: damaged units found while counting. counted_qty is the GOOD quantity only, so damaged units show as short,
+-- and the damage record explains why. first_counted_by remembers who counted before a recount was requested.
+alter table public.count_lines add column if not exists damaged_qty      numeric(14,3) not null default 0;
+alter table public.count_lines add column if not exists damage_reason    text;
+alter table public.count_lines add column if not exists damage_note      text;
+alter table public.count_lines add column if not exists damage_photos    text[] not null default '{}';
+alter table public.count_lines add column if not exists first_counted_by uuid references public.profiles (id);
+alter table public.count_lines drop constraint if exists count_lines_damaged_check;
+alter table public.count_lines add constraint count_lines_damaged_check check (damaged_qty >= 0);
 alter table public.count_lines drop constraint if exists count_lines_session_id_location_sku_key;
 create unique index if not exists count_lines_unique_idx on public.count_lines (session_id, upper(location), upper(sku), upper(batch));
 create index if not exists count_lines_barcode_idx on public.count_lines (session_id, barcode);
@@ -169,6 +182,13 @@ create table if not exists public.count_events (
   created_at  timestamptz not null default now()
 );
 create index if not exists count_events_session_idx on public.count_events (session_id, created_at);
+-- Version 4: items reported during a recount that weren't on the recount list (never counted), and photos on events
+alter table public.count_events add column if not exists location text;
+alter table public.count_events add column if not exists code     text;
+alter table public.count_events add column if not exists photos   text[];
+alter table public.count_events drop constraint if exists count_events_event_check;
+alter table public.count_events add constraint count_events_event_check
+  check (event in ('count', 'found', 'recount_request', 'accept', 'unaccept', 'status', 'reconcile', 'import', 'not_on_list'));
 create index if not exists count_events_line_idx on public.count_events (line_id, created_at);
 
 -- ---------------------------------------------------------------------
@@ -222,7 +242,9 @@ select s.id as session_id,
        count(*) filter (where l.is_found)                                       as found_lines,
        coalesce(sum(l.counted_qty - l.system_qty) filter (where l.counted_qty is not null), 0)                 as net_units,
        coalesce(sum((l.counted_qty - l.system_qty) * l.unit_cost) filter (where l.counted_qty is not null), 0) as net_value,
-       coalesce(sum(abs(l.counted_qty - l.system_qty) * l.unit_cost) filter (where l.counted_qty is not null), 0) as abs_value
+       coalesce(sum(abs(l.counted_qty - l.system_qty) * l.unit_cost) filter (where l.counted_qty is not null), 0) as abs_value,
+       coalesce(sum(l.damaged_qty) filter (where l.counted_qty is not null), 0)  as damaged_units,
+       (select count(*) from public.count_events e where e.session_id = s.id and e.event = 'not_on_list') as reported_items
 from public.count_sessions s
 left join public.count_lines l on l.session_id = s.id
 group by s.id;
@@ -274,14 +296,18 @@ create policy recon_read on public.reconciliations for select to authenticated u
 -- ---------------------------------------------------------------------
 
 -- Counter submits quantities (one location or a batch from the offline queue).
--- p_entries: [{ "line_id": 123, "qty": 10, "client_id": "uuid", "client_ts": "2026-09-30T10:00:00Z" }, ...]
+-- p_entries: [{ "line_id": 123, "qty": 10, "client_id": "uuid", "client_ts": "2026-09-30T10:00:00Z",
+--               "damaged_qty": 2, "damage_reason": "Crushed", "damage_note": "…", "photos": ["count/<session>/<line>/<id>.jpg"] }, ...]
+-- qty is the GOOD quantity. Damaged units need a reason and at least one photo.
 create or replace function public.submit_counts(p_session uuid, p_entries jsonb, p_device text default null)
 returns jsonb language plpgsql security definer set search_path = public as $$
 declare
   e jsonb; v_line public.count_lines; v_saved int := 0; v_dupes int := 0; v_skipped int := 0; v_qty numeric; v_cid uuid;
+  v_sess public.count_sessions; v_dmg numeric; v_reason text; v_photos text[];
 begin
   if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
-  if not exists (select 1 from count_sessions where id = p_session and status = 'open') then
+  select * into v_sess from count_sessions where id = p_session and status = 'open';
+  if not found then
     raise exception 'This count is not open for counting' using errcode = 'P0001';
   end if;
   for e in select * from jsonb_array_elements(p_entries) loop
@@ -291,12 +317,30 @@ begin
     if v_qty is null or v_qty < 0 then v_skipped := v_skipped + 1; continue; end if;
     select * into v_line from count_lines where id = (e ->> 'line_id')::bigint and session_id = p_session for update;
     if not found then v_skipped := v_skipped + 1; continue; end if;
+    if v_sess.recount_other and v_line.recount_requested and v_line.first_counted_by = auth.uid() then
+      raise exception '% at % must be recounted by a different operator than the first count', v_line.sku, v_line.location using errcode = 'P0001';
+    end if;
+    v_dmg := coalesce((e ->> 'damaged_qty')::numeric, 0);
+    v_reason := nullif(trim(coalesce(e ->> 'damage_reason', '')), '');
+    v_photos := coalesce(array(select jsonb_array_elements_text(coalesce(e -> 'photos', '[]'::jsonb))), '{}');
+    if v_dmg < 0 then raise exception 'Damaged quantity can''t be below 0' using errcode = 'P0001'; end if;
+    if v_dmg > 0 and v_reason is null then raise exception 'Choose a reason for the damaged units of % at %', v_line.sku, v_line.location using errcode = 'P0001'; end if;
+    if v_dmg > 0 and cardinality(v_photos) = 0 then raise exception 'Take a photo of the damaged units of % at %', v_line.sku, v_line.location using errcode = 'P0001'; end if;
     update count_lines set counted_qty = v_qty, counted_by = auth.uid(),
            counted_at = coalesce((e ->> 'client_ts')::timestamptz, now()),
-           count_round = count_round + 1, recount_requested = false, accepted = false, accepted_by = null, accepted_at = null
+           count_round = count_round + 1, recount_requested = false, accepted = false, accepted_by = null, accepted_at = null,
+           damaged_qty = v_dmg, damage_reason = case when v_dmg > 0 then v_reason end,
+           damage_note = case when v_dmg > 0 then nullif(trim(coalesce(e ->> 'damage_note', '')), '') end,
+           damage_photos = case when v_dmg > 0 then v_photos else '{}' end
      where id = v_line.id;
-    insert into count_events (session_id, line_id, event, qty, prev_qty, device, client_id, client_ts)
-    values (p_session, v_line.id, 'count', v_qty, v_line.counted_qty, p_device, v_cid, (e ->> 'client_ts')::timestamptz);
+    insert into count_events (session_id, line_id, event, qty, prev_qty, note, photos, device, client_id, client_ts)
+    values (p_session, v_line.id, 'count', v_qty, v_line.counted_qty,
+            nullif(concat_ws('; ', case when (e ->> 'first_entry') is null then null
+                                        when (e ->> 'first_entry')::numeric = v_qty then 'Confirmed by typing twice: ' || v_qty
+                                        else 'Re-entered: first ' || (e ->> 'first_entry') || ', final ' || v_qty end,
+                                   case when v_dmg > 0 then 'Damaged ' || v_dmg || ': ' || v_reason end), ''),
+            case when v_dmg > 0 then v_photos end,
+            p_device, v_cid, (e ->> 'client_ts')::timestamptz);
     v_saved := v_saved + 1;
   end loop;
   return jsonb_build_object('saved', v_saved, 'duplicates', v_dupes, 'skipped', v_skipped);
@@ -355,7 +399,9 @@ begin
   if not exists (select 1 from count_sessions where id = p_session and status = 'open') then raise exception 'Reopen the count before requesting recounts'; end if;
   insert into count_events (session_id, line_id, event, prev_qty, note)
     select p_session, id, 'recount_request', counted_qty, p_note from count_lines where session_id = p_session and id = any (p_line_ids) and counted_qty is not null;
-  update count_lines set counted_qty = null, counted_by = null, counted_at = null, recount_requested = true, accepted = false, accepted_by = null, accepted_at = null
+  update count_lines set first_counted_by = coalesce(first_counted_by, counted_by),
+         counted_qty = null, counted_by = null, counted_at = null, recount_requested = true, accepted = false, accepted_by = null, accepted_at = null,
+         damaged_qty = 0, damage_reason = null, damage_note = null, damage_photos = '{}'
    where session_id = p_session and id = any (p_line_ids) and counted_qty is not null;
   get diagnostics v_n = row_count;
   return v_n;
@@ -473,7 +519,7 @@ left join public.profiles p on p.id = l.counted_by;
 create view public.session_list with (security_invoker = true) as
 select s.*, p.full_name as created_by_name, c.full_name as closed_by_name,
        st.lines_total, st.lines_counted, st.locations_total, st.locations_open, st.lines_within, st.lines_out,
-       st.lines_accepted, st.lines_recount, st.found_lines, st.net_units, st.net_value, st.abs_value
+       st.lines_accepted, st.lines_recount, st.found_lines, st.net_units, st.net_value, st.abs_value, st.damaged_units, st.reported_items
 from public.count_sessions s
 left join public.session_stats st on st.session_id = s.id
 left join public.profiles p on p.id = s.created_by
@@ -487,7 +533,8 @@ join public.count_sessions s on s.id = r.session_id
 left join public.profiles p on p.id = r.approved_by;
 
 create view public.event_list with (security_invoker = true) as
-select e.*, p.full_name as user_name, l.location, l.sku
+select e.id, e.session_id, e.line_id, e.event, e.qty, e.prev_qty, e.note, e.user_id, e.device, e.client_id, e.client_ts, e.created_at,
+       e.code, e.photos, p.full_name as user_name, coalesce(l.location, e.location) as location, coalesce(l.sku, e.code) as sku
 from public.count_events e
 left join public.profiles p on p.id = e.user_id
 left join public.count_lines l on l.id = e.line_id;
@@ -499,11 +546,11 @@ drop function if exists public.mobile_sessions();
 create or replace function public.mobile_sessions()
 returns table (id uuid, name text, site text, zone text, tolerance_pct numeric, blind boolean, confirm_location boolean,
                rack_grouping text, excess_batch text, excess_mfg text, excess_expiry text,
-               lines_total bigint, lines_counted bigint, locations_total bigint, locations_open bigint)
+               lines_total bigint, lines_counted bigint, locations_total bigint, locations_open bigint, recheck_pct numeric)
 language sql stable security definer set search_path = public as $$
   select s.id, s.name, s.site, s.zone, s.tolerance_pct, s.blind, s.confirm_location,
          s.rack_grouping, s.excess_batch, s.excess_mfg, s.excess_expiry,
-         st.lines_total, st.lines_counted, st.locations_total, st.locations_open
+         st.lines_total, st.lines_counted, st.locations_total, st.locations_open, s.recheck_pct
   from count_sessions s join session_stats st on st.session_id = s.id
   where s.status = 'open' and public.my_role() is not null
   order by s.opened_at desc nulls last
@@ -514,18 +561,24 @@ drop function if exists public.mobile_lines(uuid, timestamptz, int, int);
 drop function if exists public.mobile_lines(uuid, timestamptz, bigint, int);
 create or replace function public.mobile_lines(p_session uuid, p_since timestamptz default null, p_after_id bigint default 0, p_limit int default 1000)
 returns table (id bigint, seq int, location text, sku text, barcode text, batch text, description text, uom text, units_per_case numeric, system_qty numeric,
-               counted_qty numeric, counted_by_name text, counted_at timestamptz, recount_requested boolean, is_found boolean, updated_at timestamptz)
+               counted_qty numeric, counted_by_name text, counted_at timestamptz, recount_requested boolean, is_found boolean, updated_at timestamptz,
+               damaged_qty numeric, damage_reason text, damage_note text, damage_photos text[], recount_blocked boolean, ref_v numeric)
 language plpgsql stable security definer set search_path = public as $$
-declare v_role app_role := public.my_role(); v_show_sys boolean;
+declare v_role app_role := public.my_role(); v_show_sys boolean; v_other boolean;
 begin
   if v_role is null then return; end if;
-  select (not s.blind) or v_role in ('admin', 'supervisor') into v_show_sys
+  -- Blind means blind on the phone for EVERYONE, supervisors and admins included. They see system quantities on the console.
+  select not s.blind, s.recount_other into v_show_sys, v_other
     from count_sessions s where s.id = p_session and (s.status = 'open' or v_role in ('admin', 'supervisor'));
   if v_show_sys is null then return; end if;
   return query
   select l.id, l.seq, l.location, l.sku, l.barcode, l.batch, l.description, l.uom, l.units_per_case,
-         case when v_show_sys then l.system_qty end,
-         l.counted_qty, p.full_name, l.counted_at, l.recount_requested, l.is_found, l.updated_at
+         case when v_show_sys and not l.recount_requested then l.system_qty end,   -- recounts are always blind
+         l.counted_qty, p.full_name, l.counted_at, l.recount_requested, l.is_found, l.updated_at,
+         l.damaged_qty, l.damage_reason, l.damage_note, l.damage_photos,
+         (v_other and l.recount_requested and l.first_counted_by = auth.uid()),
+         -- scrambled system quantity, used only by the phone's "enter it again" check and never displayed
+         case when not l.is_found then l.system_qty * 97 + l.id * 13 end
   from count_lines l
   left join profiles p on p.id = l.counted_by
   where l.session_id = p_session and l.id > coalesce(p_after_id, 0)
@@ -539,6 +592,21 @@ returns table (id uuid, full_name text, email text, role app_role, site text, ac
 language sql stable security definer set search_path = public as $$
   select id, full_name, email, role, site, active from profiles where id = auth.uid()
 $$;
+
+-- During a recount the operator may only count the SKUs on his list. Anything else he finds there is REPORTED, never counted:
+-- it goes to the supervisor as an exception with a note and a photo, and inventory isn't touched.
+create or replace function public.report_not_on_list(p_session uuid, p_location text, p_code text, p_note text default null,
+    p_photos text[] default '{}', p_client_id uuid default null, p_device text default null)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  if not exists (select 1 from count_sessions where id = p_session and status = 'open') then raise exception 'This count is not open for counting'; end if;
+  if p_client_id is not null and exists (select 1 from count_events where client_id = p_client_id) then return; end if;
+  insert into count_events (session_id, event, location, code, note, photos, device, client_id)
+  values (p_session, 'not_on_list', trim(p_location), trim(p_code), nullif(trim(coalesce(p_note, '')), ''), coalesce(p_photos, '{}'), p_device, p_client_id);
+end $$;
+revoke all on function public.report_not_on_list(uuid, text, text, text, text[], uuid, text) from public, anon;
+grant execute on function public.report_not_on_list(uuid, text, text, text, text[], uuid, text) to authenticated;
 
 grant execute on function public.mobile_sessions(), public.mobile_lines(uuid, timestamptz, bigint, int), public.whoami() to authenticated;
 revoke all on function public.mobile_sessions(), public.mobile_lines(uuid, timestamptz, bigint, int), public.whoami() from public, anon;
@@ -897,3 +965,17 @@ grant execute on function public.qc_import(jsonb, text, text, boolean), public.q
 grant select on public.qc_orders, public.qc_lines, public.qc_events to authenticated;
 grant select on public.qc_order_stats, public.qc_order_list, public.qc_line_v, public.qc_event_list to authenticated;
 revoke all on public.qc_orders, public.qc_lines, public.qc_events from anon;
+
+
+-- =====================================================================
+-- PHOTOS (version 4): damaged stock and reported items. Private bucket.
+-- Phones upload their own photos; supervisors and admins can view all of them.
+-- Photos are compressed on the phone to about 150 KB each.
+-- =====================================================================
+insert into storage.buckets (id, name, public) values ('stowra-photos', 'stowra-photos', false) on conflict (id) do nothing;
+drop policy if exists stowra_photos_upload on storage.objects;
+create policy stowra_photos_upload on storage.objects for insert to authenticated
+  with check (bucket_id = 'stowra-photos' and public.my_role() is not null);
+drop policy if exists stowra_photos_read on storage.objects;
+create policy stowra_photos_read on storage.objects for select to authenticated
+  using (bucket_id = 'stowra-photos' and (public.is_staff() or owner = auth.uid()));

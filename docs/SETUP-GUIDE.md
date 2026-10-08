@@ -153,6 +153,19 @@ The APK from Part 4 is a *debug* build. It's fine for testing and for installing
    - **Start at label position** lets you reuse a partly used label sheet.
    - If a code can't be encoded in the chosen barcode type (for example letters in EAN-13), or the bars would be too thin to scan, the console lists it before printing.
 
+## Version 4 changes (recount, damaged stock, blind fix)
+
+**Do this once:** in Supabase open **SQL Editor > New query**, paste the whole new `supabase/schema.sql` and click **Run**. It keeps all existing data. It also creates the private photo storage (bucket `stowra-photos`).
+
+- **Blind count is now blind for everyone on the phone.** Before, supervisors and admins who counted on the phone still saw the system quantity. Now nobody sees it on the phone when a count is blind; supervisors see it on the console only. Recounts are always blind, even on a count that isn't.
+- **Recount shows the SKUs.** After scanning a recount location, the phone lists only the items sent back for recount. Other products at that location can't be counted. If the operator finds something that isn't on the list, he taps **Item not on list**, scans it and takes a photo. It is reported to the supervisor (Activity tab, Overview figure, and the "Reported items" sheet in the export) and never changes stock.
+- **Optional rule:** in a count's settings, tick **Recounts must be done by a different operator than the first count**.
+- **Type it again (typing check).** If the quantity found (good + damaged) differs from the system by more than 5%, the phone asks the operator to count and type it again. The same number twice is accepted; a different second number becomes the final quantity. Both cases are written to the Activity tab ("Confirmed by typing twice" or "Re-entered: first 50, final 5"). The % is set per count in Settings (0 turns it off). The message never says whether the number is too high or too low, so the count stays blind. It doesn't apply in "Each scan = 1" mode, where every unit is scanned.
+- **Damaged stock in cycle count.** On the quantity screen, the operator enters the **good** units, then opens **Damaged units found?** and records the damaged quantity, a reason, the condition and at least one photo. Damaged units are not counted as stock, so they show as short, with the damage recorded as the cause. On the console: the **Damaged** filter, a Damaged column with the photos, and damage columns in the Excel export.
+- **Order QC short pick list.** When an order is sent back short, the phone shows the list to pick and pack. On the console, **Short pick list** (Order QC page) prints the list for all short orders, and **Print short pick list** on an order prints that one.
+
+**Photo storage:** photos are compressed on the phone to about 150 KB, so the free Supabase plan (1 GB) holds roughly 6,000 photos. Photos taken offline wait on the phone and upload with the counts.
+
 ## Order QC (checking picked orders before dispatch)
 
 Order QC checks that each picked order has exactly the right quantity of every product before it leaves.

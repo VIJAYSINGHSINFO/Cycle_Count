@@ -189,8 +189,10 @@ function announce() { if (!M.channel) return; const L = M.phase === "count" ? M.
 /* ---------- walk logic: suggest location > scan location > scan product > quantity ---------- */
 const lineOf = id => M.byId.get(id);
 const expectedAt = li => M.locs[li].ids.filter(id => !lineOf(id).is_found);
-const locDone = li => M.locs[li].ids.every(id => lineOf(id).counted_qty != null);
-const locRecount = li => M.locs[li].ids.some(id => { const l = lineOf(id); return l.recount_requested && l.counted_qty == null; });
+// A line waiting for recount that this operator isn't allowed to recount (he did the first count) is "done" for him.
+const locDone = li => M.locs[li].ids.every(id => { const l = lineOf(id); return l.counted_qty != null || l.recount_blocked; });
+const locRecount = li => M.locs[li].ids.some(id => { const l = lineOf(id); return l.recount_requested && l.counted_qty == null && !l.recount_blocked; });
+const recountIds = li => li < 0 ? [] : M.locs[li].ids.filter(id => { const l = lineOf(id); return l.recount_requested && l.counted_qty == null; });
 function rackOf(key) { if (M.sess.rack_grouping === "none") return key; if (M.sess.rack_grouping === "last_char") return key.length > 3 && /[A-Z]$/.test(key) ? key.slice(0, -1) : key; const m = key.match(/^(.*)[-\/. _]([^-\/. _]+)$/); return m ? m[1] : key; }
 function rackLocs(li) { const r = M.locs[li].rack; return M.locs.map((L, i) => L.rack === r ? i : -1).filter(i => i >= 0); }
 function nextLoc(from) {
@@ -203,7 +205,15 @@ function nextLoc(from) {
   }
   return fallback;
 }
-function newVisit(li, confirmed) { M.cur = li; M.phase = li < 0 ? "done" : confirmed ? "count" : "arrive"; M.visit = {totals: new Map(), order: [], lastBatch: new Map()}; M.item = null; M.err = null; }
+function newVisit(li, confirmed) {
+  M.cur = li; M.phase = li < 0 ? "done" : confirmed ? "count" : "arrive";
+  // Recount visit: only the lines sent back for recount can be counted here; the list is fixed for the whole visit.
+  const rc = recountIds(li);
+  M.visit = {totals: new Map(), order: [], lastBatch: new Map(), damage: new Map(), recount: rc.length ? rc : null};
+  M.item = null; M.err = null;
+}
+const inRecount = () => !!(M.visit && M.visit.recount);
+const recountAllowed = () => M.visit.recount.filter(id => !lineOf(id).recount_blocked);
 
 function renderWalk() {
   if (M.cur < 0 || M.cur >= M.locs.length || !M.visit) newVisit(nextLoc(-1), false);
@@ -232,29 +242,42 @@ function rack(L, state) {
     <div class="rack-loc">${esc(L.loc)}</div><div class="bars" aria-hidden="true"></div>
     ${levels.length > 1 ? `<div class="levels">Rack ${esc(L.rackLabel)}: ${levels.map(i => `<span class="${i === M.locIdx.get(L.key) ? "on" : ""} ${locDone(i) ? "done" : ""}">${esc(M.locs[i].loc.slice(L.rackLabel.length).replace(/^[-\/. _]/, "") || M.locs[i].loc)}</span>`).join("")}</div>` : ""}</div>`;
 }
-function focusScan() { const s = $("#scan"); if (s && !["qty", "excess", "batch"].includes(M.phase)) s.focus(); }
+function focusScan() { const s = $("#scan"); if (s && !["qty", "excess", "batch", "report"].includes(M.phase)) s.focus(); }
 function setPlaceholder(t) { const s = $("#scan"); if (s) s.placeholder = t; }
 
 function renderStage() {
   const st = $("#stage"), dock = $("#dock"); if (!st) return;
   if (M.closed) { st.innerHTML = `<div class="panel entry-empty"><h3>This count is closed</h3><p>A supervisor closed it. Anything saved on this device is still sent when possible.</p></div>`; dock.innerHTML = `<button class="btn" data-act="back">Choose another count</button>`; setPlaceholder(""); return; }
   if (M.phase === "done" || M.cur < 0) { st.innerHTML = `<div class="panel entry-empty"><div class="big-ok">✓</div><h3>Every location is counted</h3><p>Your supervisor reviews the results on the console. New recounts appear here automatically.</p></div>`; dock.innerHTML = `<button class="btn" data-act="back">Choose another count</button>`; setPlaceholder("Scan a location to count it again"); renderUpNext(); return; }
-  if (["qty", "batch", "excess"].includes(M.phase)) { const u = $("#upnext"); if (u) u.innerHTML = ""; setPlaceholder("Finish this item first"); }
+  if (["qty", "batch", "excess", "report"].includes(M.phase)) { const u = $("#upnext"); if (u) u.innerHTML = ""; setPlaceholder("Finish this item first"); }
   const L = M.locs[M.cur], err = M.err ? `<div class="alert ${M.err.kind}" role="alert"><strong>${M.err.title}</strong><span>${M.err.body}</span>${M.err.actions ? `<div class="row">${M.err.actions}</div>` : ""}</div>` : "";
   if (M.phase === "arrive") {
     st.innerHTML = `${err}<div class="panel">${rack(L, "next")}
-      ${locRecount(M.cur) ? `<p class="flag" style="display:inline-block;margin:10px 0 0">Recount requested</p>` : ""}
+      ${locRecount(M.cur) ? `<p class="flag" style="display:inline-block;margin:10px 0 0">Recount: ${fmt(recountIds(M.cur).filter(id => !lineOf(id).recount_blocked).length)} item${recountIds(M.cur).filter(id => !lineOf(id).recount_blocked).length === 1 ? "" : "s"}. Scan the location to see which.</p>` : ""}
       <div class="instruct"><span class="stepn">1</span><div><strong>Go to ${esc(L.loc)} and scan the location label</strong><span class="muted small">Then scan each product you find there.</span></div></div>
       <div id="peernote"></div></div>`;
     dock.innerHTML = `<div class="row"><button class="btn ghost" data-act="skip">Skip location</button><button class="btn ghost" data-act="manual-confirm">Label damaged</button></div>`;
     setPlaceholder("Scan location label"); renderPeerNote(); renderUpNext(); focusScan(); return;
+  }
+  if (M.phase === "count" && inRecount()) {
+    const allowed = recountAllowed(), blocked = M.visit.recount.filter(id => lineOf(id).recount_blocked);
+    st.innerHTML = `${err}<div class="panel">${rack(L, "ok")}
+      <div class="instruct"><span class="stepn">2</span><div><strong>Recount only these items</strong><span class="muted small">Count every unit again. The earlier count and the system quantity are hidden. Other products here are not counted.</span></div></div>
+      ${allowed.length ? "" : `<p class="hint" style="margin-top:10px">Nothing here for you to recount.</p>`}
+      <ul class="scanned rc-list">${allowed.map(id => { const l = lineOf(id), q = M.visit.totals.get(id), d = M.visit.damage.get(id);
+        return `<li class="${q != null ? "rc-done" : ""}"><button data-act="${q != null ? "edit" : "rc-tap"}" data-id="${l.id}"><span><strong>${esc(l.sku)}</strong>${l.batch ? ` <span class="muted small">Batch ${esc(l.batch)}</span>` : ""}${d && d.qty ? ` <span class="xs bad">${fmt(d.qty)} damaged</span>` : ""}<br><span class="muted small">${esc(l.description || "")}${l.barcode ? " · " + esc(l.barcode) : ""}</span></span><span class="q">${q != null ? "✓ " + fmt(q) : "–"}</span></button></li>`; }).join("")}</ul>
+      ${blocked.length ? `<p class="hint" style="margin-top:10px">${fmt(blocked.length)} other item${blocked.length === 1 ? "" : "s"} here must be recounted by a different operator, because you did the first count: ${blocked.map(id => esc(lineOf(id).sku)).join(", ")}.</p>` : ""}
+      <div id="peernote"></div></div>`;
+    dock.innerHTML = `<button class="btn primary save" data-act="complete">Recount complete</button>
+      <div class="row"><button class="btn ghost" data-act="report-nol">Item not on list</button><button class="btn ghost" data-act="leave">Leave</button></div>`;
+    setPlaceholder("Scan a product on the list"); renderPeerNote(); renderUpNext(); focusScan(); return;
   }
   if (M.phase === "count") {
     const scanned = M.visit.order.map(id => lineOf(id)).filter(Boolean);
     st.innerHTML = `${err}<div class="panel">${rack(L, "ok")}
       <div class="instruct"><span class="stepn">2</span><div><strong>Scan a product barcode</strong><span class="muted small">${M.scanAdd ? "Each scan adds 1." : "You'll enter the quantity after each scan."}</span></div></div>
       <h3 style="margin:14px 0 4px">Scanned here <span class="muted small" style="font-family:var(--sans);font-weight:500">${scanned.length ? `(${scanned.length} item${scanned.length === 1 ? "" : "s"})` : ""}</span></h3>
-      ${scanned.length ? `<ul class="scanned">${scanned.map(l => `<li><button data-act="edit" data-id="${l.id}"><span><strong>${esc(l.sku)}</strong>${l.batch ? ` <span class="muted small">Batch ${esc(l.batch)}</span>` : ""}${l.is_found ? ' <span class="xs">Excess</span>' : ""}<br><span class="muted small">${esc(l.description || "")}</span></span><span class="q">${fmt(M.visit.totals.get(l.id))}</span></button></li>`).join("")}</ul>` : `<p class="muted small" style="margin:4px 0 0">Nothing scanned yet.</p>`}
+      ${scanned.length ? `<ul class="scanned">${scanned.map(l => `<li><button data-act="edit" data-id="${l.id}"><span><strong>${esc(l.sku)}</strong>${l.batch ? ` <span class="muted small">Batch ${esc(l.batch)}</span>` : ""}${l.is_found ? ' <span class="xs">Excess</span>' : ""}${M.visit.damage.get(l.id) && M.visit.damage.get(l.id).qty ? ` <span class="xs bad">${fmt(M.visit.damage.get(l.id).qty)} damaged</span>` : ""}<br><span class="muted small">${esc(l.description || "")}</span></span><span class="q">${fmt(M.visit.totals.get(l.id))}</span></button></li>`).join("")}</ul>` : `<p class="muted small" style="margin:4px 0 0">Nothing scanned yet.</p>`}
       <div id="peernote"></div></div>`;
     dock.innerHTML = `<button class="btn primary save" data-act="complete">Location complete</button>
       <div class="row"><button class="btn ghost" data-act="empty">Location empty</button><button class="btn ghost" data-act="excess-manual">No barcode</button><button class="btn ghost" data-act="leave">Leave</button></div>`;
@@ -274,16 +297,19 @@ function renderStage() {
     const l = lineOf(M.item.id), so = M.visit.totals.get(l.id);
     st.innerHTML = `${err}<div class="panel">${productCard(l)}
       ${so != null ? `<p class="sofar">Already scanned here: <strong>${fmt(so)}</strong></p>` : ""}
-      <label class="field" for="qty" style="margin-top:10px">${so != null ? (M.replace ? "New total quantity" : "Quantity to add") : "Quantity"}${l.uom ? ` (${esc(l.uom)})` : ""}</label>
-      <input id="qty" class="bigqty" type="number" inputmode="decimal" min="0" step="any" placeholder="0">
-      ${so != null ? `<label class="check small" style="margin-top:8px"><input type="checkbox" id="repl" ${M.replace ? "checked" : ""}> Replace the total instead of adding</label>` : ""}</div>`;
+      <label class="field" for="qty" style="margin-top:10px">${so != null ? (M.replace ? "New total of good units" : "Good units to add") : "Good units"}${l.uom ? ` (${esc(l.uom)})` : ""}</label>
+      <input id="qty" class="bigqty" type="number" inputmode="decimal" min="0" step="any" placeholder="0" ${M.replace && so != null ? `value="${so}"` : ""}>
+      ${so != null ? `<label class="check small" style="margin-top:8px"><input type="checkbox" id="repl" ${M.replace ? "checked" : ""}> Replace the total instead of adding</label>` : ""}
+      ${l.id > 0 ? damageBox(l) : ""}</div>`;
     dock.innerHTML = `<button class="btn primary save" data-act="save-qty">Save quantity</button><div class="row"><button class="btn ghost" data-act="cancel-item">Cancel</button></div>`;
     const q = $("#qty"); q.focus();
     q.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); saveQty(); } });
     const rp = $("#repl"); if (rp) rp.onchange = () => { M.replace = rp.checked; renderStage(); };
+    bindDamage(l);
     return;
   }
   if (M.phase === "excess") return renderExcess();
+  if (M.phase === "report") return renderReport();
 }
 function productCard(l, hideBatch) {
   return `<div class="prod"><div class="prod-sku">${esc(l.sku)}</div><div>${esc(l.description || "No description")}</div>
@@ -309,6 +335,7 @@ function handleScan(v) {
   if (M.closed) return;
   const k = v.toUpperCase(); M.err = null;
   const li = M.locIdx.get(k);
+  if (M.phase === "report") { const c = $("#nolcode"); if (c) c.value = v; return; }
   if (M.phase === "qty" || M.phase === "batch" || M.phase === "excess") { toast("Finish or cancel this item first.", true); return; }
   if (li != null) return scanLocation(li);
   const ids = M.codeIdx.get(k) || [];
@@ -332,6 +359,16 @@ function scanLocation(li) {
 }
 function scanProduct(v, ids) {
   const L = M.locs[M.cur];
+  if (inRecount()) {
+    const ok = ids.filter(id => recountAllowed().includes(id)), blockedHit = ids.filter(id => M.visit.recount.includes(id) && lineOf(id).recount_blocked);
+    if (!ok.length) {
+      if (blockedHit.length) setErr("bad", "Another operator must recount this", `You did the first count of ${esc(lineOf(blockedHit[0]).sku)}, so a different operator has to recount it.`);
+      else setErr("bad", "Not on the recount list", `${ids.length ? `${esc(lineOf(ids[0]).sku)} ${lineOf(ids[0]).description ? "(" + esc(lineOf(ids[0]).description) + ")" : ""}` : `Barcode <strong>${esc(v)}</strong>`} isn't one of the items to recount here, so it can't be counted. If it's physically here, report it with a photo for your supervisor.`,
+        `<button class="btn sm" data-act="report-nol" data-v="${esc(v)}">Report item not on list</button>`);
+      renderStage(); return;
+    }
+    ids = ok;
+  }
   const here = ids.filter(id => L.ids.includes(id));
   if (here.length) {
     vibrate(30);
@@ -365,22 +402,45 @@ function scanProduct(v, ids) {
 }
 function pickLine(id) { M.item = {id}; M.replace = false; M.err = null; M.phase = "qty"; const l = lineOf(id); if (l.batch) M.visit.lastBatch.set(l.sku.toUpperCase(), id); if (M.scanAdd) return addOne(id); renderStage(); }
 function addOne(id) { const n = (M.visit.totals.get(id) || 0) + 1; recordTotal(id, n); M.phase = "count"; M.item = null; const l = lineOf(id); M.err = {kind: "ok", title: `${esc(l.sku)} ${l.batch ? "/ " + esc(l.batch) : ""}: ${fmt(n)}`, body: "Scan the next unit or product."}; renderStage(); }
+/* Typing check: if what was found (good + damaged) differs from the system by more than the count's % setting,
+   the operator must count and type it again. Same number twice: accepted. Different: the second number is final.
+   The system quantity arrives scrambled (ref_v) and is never shown, so the message doesn't say higher or lower. */
+const sysOf = l => l.ref_v == null ? null : (Number(l.ref_v) - l.id * 13) / 97;
+function needsRecheck(l, found) {
+  const pct = Number(M.sess.recheck_pct || 0), sys = sysOf(l);
+  if (!pct || sys == null || l.id < 0) return false;
+  return sys === 0 ? found !== 0 : Math.abs(found - sys) / Math.abs(sys) * 100 > pct;
+}
 function saveQty() {
   const l = lineOf(M.item.id), raw = $("#qty").value.trim(), q = parseFloat(raw);
-  if (raw === "" || isNaN(q) || q < 0) { toast("Enter a quantity of 0 or more.", true); $("#qty").focus(); return; }
+  const d = readDamage(l); if (d === false) return;
+  if (raw === "" || isNaN(q) || q < 0) { toast(d && d.qty ? "Enter the good units (0 if all are damaged)." : "Enter a quantity of 0 or more.", true); $("#qty").focus(); return; }
+  if (l.id > 0) M.visit.damage.set(l.id, d || {qty: 0, reason: "", note: "", photos: []});
   const prev = M.visit.totals.get(l.id), total = prev != null && !M.replace ? prev + q : q;
-  recordTotal(l.id, total);
-  M.phase = "count"; M.item = null; M.err = {kind: "ok", title: `Saved ${fmt(total)} × ${esc(l.sku)}`, body: "Scan the next product, or tap Location complete."};
+  let firstEntry = null;
+  if (!M.recheck || M.recheck.id !== l.id) {
+    if (needsRecheck(l, total + ((d && d.qty) || 0))) {
+      M.recheck = {id: l.id, first: total};
+      M.err = {kind: "warn", title: "Please count again and re-enter", body: "This quantity needs a second check. Count the units again and type the good quantity once more."};
+      vibrate([80, 60, 80]); renderStage(); const qi = $("#qty"); if (qi) { qi.value = ""; qi.focus(); } return;
+    }
+  } else { firstEntry = M.recheck.first; M.recheck = null; }
+  recordTotal(l.id, total, firstEntry);
+  const dq = (M.visit.damage.get(l.id) || {}).qty || 0;
+  M.phase = "count"; M.item = null; M.err = {kind: "ok", title: `Saved ${fmt(total)} good × ${esc(l.sku)}${dq ? `, ${fmt(dq)} damaged` : ""}`, body: inRecount() ? "Scan the next item on the list, or tap Recount complete." : "Scan the next product, or tap Location complete."};
   renderStage();
 }
-async function recordTotal(id, total) {
+async function recordTotal(id, total, firstEntry) {
   const l = lineOf(id);
   if (!M.visit.order.includes(id)) M.visit.order.push(id);
   M.visit.totals.set(id, total);
   l.counted_qty = total; l.recount_requested = false; l.counted_by_name = M.me.full_name;
+  const dm = M.visit.damage.get(id) || {qty: 0, reason: "", note: "", photos: []};
+  l.damaged_qty = dm.qty; l.damage_reason = dm.reason || null;
   const o = l.id < 0
     ? {client_id: uuid(), kind: "excess", session_id: M.sess.id, location: l.location, sku: l.sku, barcode: l.barcode, description: l.description, uom: l.uom, batch: l.batch, mfg_date: l.mfg_date || null, expiry_date: l.expiry_date || null, expected_location: l.expected_location || null, remarks: l.remarks || null, qty: total, client_ts: new Date().toISOString(), tries: 0}
-    : {client_id: uuid(), kind: "count", session_id: M.sess.id, line_id: id, qty: total, client_ts: new Date().toISOString(), tries: 0};
+    : {client_id: uuid(), kind: "count", session_id: M.sess.id, line_id: id, qty: total, client_ts: new Date().toISOString(), tries: 0,
+       damaged_qty: dm.qty || 0, damage_reason: dm.reason || null, damage_note: dm.note || null, photos: (dm.photos || []).map(p => p.path), first_entry: firstEntry == null ? null : firstEntry};
   await queue([o]);
 }
 async function queue(items) {
@@ -389,9 +449,9 @@ async function queue(items) {
 }
 async function completeLoc(force) {
   const L = M.locs[M.cur];
-  const missing = expectedAt(M.cur).filter(id => !M.visit.totals.has(id) && lineOf(id).counted_qty == null);
+  const missing = expectedAt(M.cur).filter(id => !M.visit.totals.has(id) && lineOf(id).counted_qty == null && !lineOf(id).recount_blocked);
   if (missing.length && !force) {
-    setErr("warn", `${missing.length} expected item${missing.length === 1 ? " was" : "s were"} not scanned`, `If you've checked the whole location, they'll be saved as 0 (not found).`,
+    setErr("warn", `${missing.length} ${inRecount() ? "item" : "expected item"}${missing.length === 1 ? " was" : "s were"} not ${inRecount() ? "recounted" : "scanned"}`, `${inRecount() ? missing.map(id => esc(lineOf(id).sku)).join(", ") + ". " : ""}If you've checked the whole location, they'll be saved as 0 (not found).`,
       `<button class="btn sm primary" data-act="complete-force">Save as not found</button><button class="btn sm" data-act="dismiss">Keep counting</button>`);
     renderStage(); return;
   }
@@ -448,22 +508,105 @@ async function saveExcess() {
   renderStage();
 }
 
+/* ---------- damaged units (cycle count): good units are counted; damaged units are recorded with a reason and photos ---------- */
+const DAMAGE_REASONS = ["Crushed / dented", "Torn packaging", "Leaking", "Wet / stained", "Expired", "Broken", "Other"];
+function damageBox(l) {
+  const d = M.visit.damage.get(l.id) || {qty: 0, reason: "", note: "", photos: []};
+  M.photoDraft = (d.photos || []).slice();
+  return `<details class="dmg" id="dmgbox" data-reason="${esc(d.reason || "")}" ${d.qty ? "open" : ""}><summary>Damaged units found?</summary>
+    <p class="hint" style="margin:6px 0 10px">Damaged units are not counted as stock. They show as short, with your reason and photo as the cause.</p>
+    <label class="field">Damaged units<input id="dmgqty" type="number" inputmode="decimal" min="0" step="any" value="${d.qty || ""}" placeholder="0"></label>
+    <p class="small" style="margin:10px 0 6px;font-weight:600">Reason</p>
+    <div class="chips">${DAMAGE_REASONS.map(r => `<button type="button" class="chip" data-act="dmg-reason" data-r="${esc(r)}" aria-pressed="${d.reason === r}">${esc(r)}</button>`).join("")}</div>
+    <label class="field" style="margin-top:10px">Condition (what you see)<input id="dmgnote" value="${esc(d.note || "")}" placeholder="e.g. carton crushed, 2 bottles leaking"></label>
+    <p class="small" style="margin:10px 0 6px;font-weight:600">Photo (required)</p>
+    <div class="thumbs" id="thumbs"></div></details>`;
+}
+function bindDamage() { renderThumbs(); }
+function renderThumbs() {
+  const t = $("#thumbs"); if (!t) return;
+  t.innerHTML = (M.photoDraft || []).map((p, i) => `<span class="thumb"><img src="${esc(p.url)}" alt="Photo ${i + 1}"><button type="button" data-act="dmg-photo-del" data-i="${i}" aria-label="Remove photo">×</button></span>`).join("") +
+    `<button type="button" class="btn sm" data-act="dmg-photo">${CAM_ICON} ${(M.photoDraft || []).length ? "Add photo" : "Take photo"}</button>`;
+}
+function readDamage(l) {
+  const box = $("#dmgbox"); if (!box || l.id < 0) return null;
+  const raw = $("#dmgqty").value.trim(), qty = raw === "" ? 0 : parseFloat(raw);
+  if (isNaN(qty) || qty < 0) { toast("Damaged units must be 0 or more.", true); box.open = true; return false; }
+  if (!qty) return {qty: 0, reason: "", note: "", photos: []};
+  const reason = box.dataset.reason || "";
+  if (!reason) { box.open = true; toast("Choose a reason for the damaged units.", true); return false; }
+  if (!(M.photoDraft || []).length) { box.open = true; toast("Take a photo of the damaged units.", true); return false; }
+  return {qty, reason, note: $("#dmgnote").value.trim(), photos: M.photoDraft.slice()};
+}
+/* Photos: compressed on the phone (longest side 1280 px, JPEG), kept in the offline queue and uploaded before the counts that use them. */
+function takePhoto(prefix, done) {
+  const inp = document.createElement("input"); inp.type = "file"; inp.accept = "image/*"; inp.setAttribute("capture", "environment");
+  inp.onchange = async () => {
+    const f = inp.files && inp.files[0]; if (!f) return;
+    try {
+      const blob = await compressImage(f), path = `${prefix}/${uuid()}.jpg`;
+      if (!(await queue([{client_id: uuid(), kind: "photo", path, blob, session_id: M.sess && M.sess.id, tries: 0}]))) return;
+      done({path, url: URL.createObjectURL(blob)});
+    } catch { toast("Couldn't read that photo. Try again.", true); }
+  };
+  inp.click();
+}
+async function compressImage(file) {
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); });
+  const max = 1280, k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+  const c = document.createElement("canvas"); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return await new Promise(r => c.toBlob(r, "image/jpeg", 0.7));
+}
+
+/* ---------- recount: report an item that isn't on the list (never counted) ---------- */
+function openReport(code) { M.item = {report: {code}}; M.phase = "report"; M.err = null; M.photoDraft = []; renderStage(); }
+function renderReport() {
+  const st = $("#stage"), dock = $("#dock"), L = M.locs[M.cur], r = M.item.report;
+  st.innerHTML = `<div class="panel"><h2 style="margin-bottom:4px">Item not on the recount list</h2>
+    <p class="hint">This is <strong>not counted</strong> and doesn't change stock. Your supervisor sees it with the photo and decides what to do.</p>
+    <label class="field">Location<input value="${esc(L.loc)}" readonly></label>
+    <label class="field">Barcode or SKU<input id="nolcode" value="${esc(r.code)}" autocapitalize="characters" placeholder="Scan or type"></label>
+    <label class="field">What did you find?<input id="nolnote" placeholder="e.g. about 6 cartons, different batch"></label>
+    <p class="small" style="margin:10px 0 6px;font-weight:600">Photo (required)</p><div class="thumbs" id="thumbs"></div></div>`;
+  dock.innerHTML = `<button class="btn primary save" data-act="save-report">Send report</button><div class="row"><button class="btn ghost" data-act="cancel-item">Cancel</button></div>`;
+  setPlaceholder("Finish this report first"); renderThumbs();
+}
+async function saveReport() {
+  const code = $("#nolcode").value.trim(), note = $("#nolnote").value.trim();
+  if (!code && !note) { toast("Enter the barcode or describe the item.", true); return; }
+  if (!(M.photoDraft || []).length) { toast("Take a photo of the item.", true); return; }
+  const L = M.locs[M.cur];
+  if (!(await queue([{client_id: uuid(), kind: "nol", session_id: M.sess.id, location: L.loc, code, note, photos: M.photoDraft.map(p => p.path), tries: 0}]))) return;
+  M.photoDraft = []; M.phase = "count"; M.item = null; M.err = {kind: "ok", title: "Reported to your supervisor", body: "Nothing was counted. Carry on with the items on the list."}; renderStage();
+}
+
 /* ---------- sync ---------- */
 async function flush() {
   if (M.syncing || !isOnline()) { renderSync(); return; }
   const todo = M.outbox.filter(o => !o.failed); if (!todo.length) { renderSync(); return; }
   M.syncing = true;
   try {
+    for (const o of todo.filter(o => o.kind === "photo")) {
+      const {error} = await sb.storage.from("stowra-photos").upload(o.path, o.blob, {contentType: "image/jpeg", upsert: false});
+      if (error && !/exist|duplicate|409/i.test(String(error.message || "") + (error.statusCode || ""))) { if (/fetch|network|timeout/i.test(error.message || "")) throw error; await markFailed([o], "Photo upload: " + error.message); continue; }
+      await removeOut([o.client_id]);
+    }
     const bySess = new Map(); todo.filter(o => o.kind === "count").forEach(o => { if (!bySess.has(o.session_id)) bySess.set(o.session_id, []); bySess.get(o.session_id).push(o); });
     for (const [sid, list] of bySess) for (let i = 0; i < list.length; i += 200) {
       const part = list.slice(i, i + 200);
-      const {error} = await sb.rpc("submit_counts", {p_session: sid, p_entries: part.map(o => ({line_id: o.line_id, qty: o.qty, client_id: o.client_id, client_ts: o.client_ts})), p_device: DEVICE});
+      const {error} = await sb.rpc("submit_counts", {p_session: sid, p_entries: part.map(o => ({line_id: o.line_id, qty: o.qty, client_id: o.client_id, client_ts: o.client_ts, damaged_qty: o.damaged_qty || 0, damage_reason: o.damage_reason || null, damage_note: o.damage_note || null, photos: o.photos || [], first_entry: o.first_entry == null ? undefined : o.first_entry})), p_device: DEVICE});
       if (error) { if (isServerError(error)) { await markFailed(part, error.message); continue; } throw error; }
       await removeOut(part.map(o => o.client_id));
     }
     for (const o of todo.filter(o => o.kind === "excess")) {
       const {error} = await sb.rpc("add_excess", {p_session: o.session_id, p_location: o.location, p_sku: o.sku, p_qty: o.qty, p_barcode: o.barcode || null, p_description: o.description || null, p_uom: o.uom || null,
         p_batch: o.batch || null, p_mfg_date: o.mfg_date || null, p_expiry_date: o.expiry_date || null, p_expected_location: o.expected_location || null, p_remarks: o.remarks || null, p_client_id: o.client_id, p_device: DEVICE});
+      if (error) { if (isServerError(error)) { await markFailed([o], error.message); continue; } throw error; }
+      await removeOut([o.client_id]);
+    }
+    for (const o of todo.filter(o => o.kind === "nol")) {
+      const {error} = await sb.rpc("report_not_on_list", {p_session: o.session_id, p_location: o.location, p_code: o.code, p_note: o.note || null, p_photos: o.photos || [], p_client_id: o.client_id, p_device: DEVICE});
       if (error) { if (isServerError(error)) { await markFailed([o], error.message); continue; } throw error; }
       await removeOut([o.client_id]);
     }
@@ -552,7 +695,13 @@ document.addEventListener("click", async e => {
     case "batch-other": { const l = lineOf(M.item.ids[0]); openExcess({sku: l.sku, barcode: l.barcode, description: l.description, uom: l.uom, reason: "This batch isn't expected here."}); break; }
     case "edit": M.item = {id: +b.dataset.id}; M.replace = true; M.err = null; M.phase = "qty"; renderStage(); break;
     case "save-qty": saveQty(); break;
-    case "cancel-item": M.phase = "count"; M.item = null; M.err = null; renderStage(); break;
+    case "rc-tap": toast("Scan the product's barcode to recount it.", true); focusScan(); break;
+    case "report-nol": openReport(b.dataset.v || ""); break;
+    case "save-report": saveReport(); break;
+    case "dmg-reason": { const box = $("#dmgbox"); if (!box) break; box.dataset.reason = b.dataset.r; $$("#dmgbox [data-act=dmg-reason]").forEach(x => x.setAttribute("aria-pressed", x === b)); break; }
+    case "dmg-photo": takePhoto(M.item && M.item.id ? `count/${M.sess.id}/${M.item.id}` : `count/${M.sess.id}/report`, ph => { const t = M.photoDraft; t.push(ph); renderThumbs(); }); break;
+    case "dmg-photo-del": { M.photoDraft.splice(+b.dataset.i, 1); renderThumbs(); break; }
+    case "cancel-item": M.phase = "count"; M.item = null; M.err = null; M.photoDraft = []; M.recheck = null; renderStage(); break;
     case "dismiss": M.err = null; renderStage(); break;
     case "complete": completeLoc(false); break;
     case "complete-force": completeLoc(true); break;

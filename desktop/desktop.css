@@ -86,3 +86,21 @@ dialog::backdrop{background:rgba(10,14,20,.45)}
 .side .brand .wordmark{font-size:1.65rem;color:#fff}
 .stat{box-shadow:0 1px 0 rgba(19,35,63,.04)}
 .pill.open{background:#E7EDF7;color:var(--navy)}
+
+/* photos and damaged units */
+.linkbtn{border:0;background:none;padding:0;color:var(--navy);text-decoration:underline;text-underline-offset:3px;cursor:pointer;font:inherit}
+.photodlg{max-width:860px;width:calc(100% - 32px)}
+.photogrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.photogrid img{width:100%;height:220px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block}
+.nophoto{height:120px;display:grid;place-items:center;text-align:center;padding:10px;border:1px dashed var(--line);border-radius:8px;color:var(--muted);font-size:.85rem}
+
+/* Order QC short pick list (print only) */
+#qcprint{display:none}
+@media print{
+  body.qc-printing > *:not(#qcprint){display:none !important}
+  body.qc-printing{background:#fff !important}
+  body.qc-printing #qcprint{display:block;color:#000;font:11pt/1.35 Arial,sans-serif}
+  #qcprint h1{font-size:18pt;margin:0 0 4px} #qcprint h2{font-size:13pt;margin:14px 0 6px} #qcprint h2 small{font-weight:400;font-size:10pt}
+  #qcprint table{width:100%;border-collapse:collapse} #qcprint th,#qcprint td{border:1px solid #888;padding:4px 6px;text-align:left;background:#fff;color:#000}
+  #qcprint .n{text-align:right} #qcprint .box{width:60px} #qcprint section{break-inside:avoid} #qcprint .sign{margin-top:8px}
+}

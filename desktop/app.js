@@ -129,7 +129,9 @@ async function pageCounts() {
         <label class="field">Zone<input name="zone" placeholder="e.g. Aisle A to F"></label>
         <label class="field">Tolerance (%)<input name="tol" type="number" min="0" step="0.1" value="2"></label>
       </div>
-      <label class="check" style="margin:14px 0 6px"><input type="checkbox" name="blind" checked> Blind count (counters don't see system quantity)</label>
+      <label class="check" style="margin:14px 0 6px"><input type="checkbox" name="blind" checked> Blind count (nobody sees the system quantity on the phone, supervisors included)</label>
+      <label class="check" style="margin:0 0 6px"><input type="checkbox" name="rc_other"> Recounts must be done by a different operator than the first count</label>
+      <label class="field" style="max-width:420px">Ask the operator to type the quantity again when it differs from the system by more than (%). 0 = off<input name="recheck" type="number" min="0" step="0.5" value="5"></label>
       ${countOptions({}, false)}
       <div class="row" style="margin-top:14px"><button class="btn primary" value="ok">Create count</button><button class="btn ghost" value="cancel" formnovalidate>Cancel</button></div></form></dialog>`;
 }
@@ -150,7 +152,7 @@ function countOptions(s, locked) {
       <label class="field">Manufacturing date${sel("ex_mfg", s.excess_mfg || "optional")}</label>
       <label class="field">Expiry date${sel("ex_exp", s.excess_expiry || "required")}</label></div></fieldset>`;
 }
-const readOptions = el => ({rack_grouping: el("rack").value, excess_batch: el("ex_batch").value, excess_mfg: el("ex_mfg").value, excess_expiry: el("ex_exp").value});
+const readOptions = el => ({rack_grouping: el("rack").value, excess_batch: el("ex_batch").value, excess_mfg: el("ex_mfg").value, excess_expiry: el("ex_exp").value, recount_other: !!(el("rc_other") && el("rc_other").checked), recheck_pct: el("recheck") ? Math.max(0, parseFloat(el("recheck").value) || 0) : 5});
 /* ---------- one count ---------- */
 const V = {filter: "out", search: "", page: 0, per: 100, sel: new Set()};
 async function loadSession(id) { const r = await q(sb.from("session_list").select("*").eq("id", id).single()); return r; }
@@ -192,6 +194,8 @@ function tabOverview(s) {
       <div class="stat"><div class="l">Out of tolerance</div><div class="v ${s.lines_out ? "var-neg" : ""}">${fmt(s.lines_out)}</div></div>
       <div class="stat"><div class="l">Recounts pending</div><div class="v">${fmt(s.lines_recount)}</div></div>
       <div class="stat"><div class="l">Excess and misplaced lines</div><div class="v">${fmt(s.found_lines)}</div></div>
+      <div class="stat"><div class="l">Damaged units found</div><div class="v ${+s.damaged_units ? "var-neg" : ""}">${fmt(s.damaged_units || 0)}</div>${+s.damaged_units ? `<a class="small" href="#/count/${s.id}/variances" data-act="vfilter-damaged">See damaged lines</a>` : ""}</div>
+      <div class="stat"><div class="l">Reported, not on recount list</div><div class="v">${fmt(s.reported_items || 0)}</div>${+s.reported_items ? `<a class="small" href="#/count/${s.id}/activity">See reports</a>` : ""}</div>
       <div class="stat"><div class="l">Net unit variance</div><div class="v ${s.net_units > 0 ? "var-pos" : s.net_units < 0 ? "var-neg" : ""}">${s.net_units > 0 ? "+" : ""}${fmt(s.net_units)}</div></div>
       <div class="stat"><div class="l">Net value variance</div><div class="v ${s.net_value > 0 ? "var-pos" : s.net_value < 0 ? "var-neg" : ""}">${money(s.net_value)}</div></div>
       <div class="stat"><div class="l">Absolute value variance</div><div class="v">${money(s.abs_value)}</div></div>
@@ -362,12 +366,13 @@ function lineQuery(s, select = "*", count) {
   else if (f === "uncounted") qq = qq.eq("status", "uncounted");
   else if (f === "recount") qq = qq.eq("status", "recount");
   else if (f === "found") qq = qq.eq("is_found", true);
+  else if (f === "damaged") qq = qq.gt("damaged_qty", 0);
   const term = V.search.replace(/[,()%*\\]/g, " ").trim();
   if (term) qq = qq.or(`location.ilike.%${term}%,sku.ilike.%${term}%`);
   return qq;
 }
 async function tabVariances(s) {
-  const F = [["out", "Out of tolerance"], ["variance", "Any variance"], ["uncounted", "Not counted"], ["recount", "Recount pending"], ["found", "Excess and misplaced"], ["all", "All lines"]];
+  const F = [["out", "Out of tolerance"], ["variance", "Any variance"], ["uncounted", "Not counted"], ["recount", "Recount pending"], ["damaged", "Damaged"], ["found", "Excess and misplaced"], ["all", "All lines"]];
   const editable = s.status === "open" || s.status === "closed";
   $("#tab").innerHTML = `<div class="toolbar"><div class="chips">${F.map(([k, l]) => `<button class="chip" aria-pressed="${V.filter === k}" data-act="vfilter" data-f="${k}">${l}</button>`).join("")}</div>
       <div class="row"><input class="search" id="vsearch" placeholder="Search location or SKU" value="${esc(V.search)}"><button class="btn sm" data-act="export">Export to Excel</button></div></div>
@@ -391,10 +396,11 @@ async function loadVariances(s) {
   const {data, count} = res;
   const sc = $("#selcount"); if (sc) sc.textContent = V.sel.size ? `${V.sel.size} selected` : "";
   if (!data.length) { $("#vtable").innerHTML = `<div class="empty" style="border:0"><h3>No lines in this view</h3><p>${V.filter === "out" ? "Nothing is out of tolerance." : "Try another filter or search."}</p></div>`; $("#pager").innerHTML = ""; return; }
-  $("#vtable").innerHTML = `<table><thead><tr>${editable ? `<th><input type="checkbox" id="selall" aria-label="Select all on this page"></th>` : ""}<th>Location</th><th>SKU</th><th>Description</th><th>Batch</th><th>Expiry</th><th class="n">System</th><th class="n">Counted</th><th class="n">Variance</th><th class="n">%</th><th class="n">Value</th><th>Status</th><th>Counted by</th><th class="n">Round</th></tr></thead><tbody>
+  $("#vtable").innerHTML = `<table><thead><tr>${editable ? `<th><input type="checkbox" id="selall" aria-label="Select all on this page"></th>` : ""}<th>Location</th><th>SKU</th><th>Description</th><th>Batch</th><th>Expiry</th><th class="n">System</th><th class="n">Counted (good)</th><th class="n">Damaged</th><th class="n">Variance</th><th class="n">%</th><th class="n">Value</th><th>Status</th><th>Counted by</th><th class="n">Round</th></tr></thead><tbody>
     ${data.map(l => `<tr class="${V.sel.has(l.id) ? "sel" : ""}">${editable ? `<td><input type="checkbox" data-sel="${l.id}" ${V.sel.has(l.id) ? "checked" : ""} aria-label="Select ${esc(l.location)} ${esc(l.sku)}"></td>` : ""}
       <td><span class="tag">${esc(l.location)}</span></td><td><strong>${esc(l.sku)}</strong>${l.is_found ? (l.expected_location ? ` <span class="status s-accepted" title="System location ${esc(l.expected_location)}">Misplaced from ${esc(l.expected_location)}</span>` : ' <span class="status s-accepted">Excess</span>') : ""}${l.remarks ? `<br><span class="small muted">${esc(l.remarks)}</span>` : ""}</td><td class="desc">${esc(l.description)}</td><td>${esc(l.batch || "")}</td><td class="small">${expiryCell(l)}</td>
       <td class="n">${fmt(l.system_qty)}</td><td class="n">${fmt(l.counted_qty)}</td>
+      <td class="n">${+l.damaged_qty ? `<span class="var-neg">${fmt(l.damaged_qty)}</span><br><span class="small muted" style="white-space:normal">${esc(l.damage_reason || "")}</span>${(l.damage_photos || []).length ? `<br><button class="linkbtn small" data-act="photos" data-p="${esc(JSON.stringify(l.damage_photos))}" data-t="${esc(`${l.location} · ${l.sku}: ${fmt(l.damaged_qty)} damaged, ${l.damage_reason || ""}${l.damage_note ? ". " + l.damage_note : ""}`)}">Photo${l.damage_photos.length === 1 ? "" : "s"} (${l.damage_photos.length})</button>` : ""}` : ""}</td>
       <td class="n ${l.variance > 0 ? "var-pos" : l.variance < 0 ? "var-neg" : ""}">${l.variance == null ? "–" : (l.variance > 0 ? "+" : "") + fmt(l.variance)}</td>
       <td class="n">${l.variance_pct == null ? "–" : (l.variance_pct > 0 ? "+" : "") + fmt(l.variance_pct) + "%"}</td>
       <td class="n">${l.variance_value == null ? "–" : money(l.variance_value)}</td>
@@ -413,13 +419,21 @@ async function allIdsWhere(s, filterFn) {
 }
 async function chunked(ids, fn) { let n = 0; for (let i = 0; i < ids.length; i += 500) n += await q(fn(ids.slice(i, i + 500))); return n; }
 
+async function showPhotos(paths, title) {
+  let d = $("#photodlg"); if (d) d.remove();
+  d = document.createElement("dialog"); d.id = "photodlg"; d.className = "photodlg";
+  d.innerHTML = `<form method="dialog"><h2 style="margin-bottom:6px">Photos</h2><p class="hint">${esc(title)}</p><div class="photogrid" id="photogrid"><div class="loading">Loading…</div></div><div class="row" style="margin-top:12px"><button class="btn">Close</button></div></form>`;
+  document.body.appendChild(d); d.showModal();
+  const urls = await Promise.all(paths.map(async p => { try { const r = await sb.storage.from("stowra-photos").createSignedUrl(p, 600); return r.error ? null : r.data.signedUrl; } catch { return null; } }));
+  $("#photogrid").innerHTML = urls.map((u, i) => u ? `<a href="${esc(u)}" target="_blank" rel="noopener"><img src="${esc(u)}" alt="Photo ${i + 1}"></a>` : `<div class="nophoto">Photo ${i + 1} is still uploading from the phone</div>`).join("");
+}
 function expiryCell(l) { if (!l.expiry_date) return l.mfg_date ? `Mfg ${d8(l.mfg_date)}` : ""; const past = l.expiry_date < new Date().toISOString().slice(0, 10); return `<span class="${past ? "var-neg" : ""}">${d8(l.expiry_date)}${past ? " (expired)" : ""}</span>${l.mfg_date ? `<br><span class="muted">Mfg ${d8(l.mfg_date)}</span>` : ""}`; }
 /* ---------- activity ---------- */
 async function tabActivity(s) {
   let rows; try { rows = await q(sb.from("event_list").select("*").eq("session_id", s.id).order("created_at", {ascending: false}).limit(300)); } catch (e) { fail(e); rows = []; }
-  const L = {count: "Counted", found: "Found stock", recount_request: "Recount requested", accept: "Variance accepted", unaccept: "Accept undone", status: "Status changed", reconcile: "Reconciled", import: "Stock file uploaded"};
+  const L = {count: "Counted", found: "Found stock", recount_request: "Recount requested", accept: "Variance accepted", unaccept: "Accept undone", status: "Status changed", reconcile: "Reconciled", import: "Stock file uploaded", not_on_list: "Reported: not on recount list"};
   $("#tab").innerHTML = rows.length ? `<p class="hint">Every action on this count is recorded permanently. Showing the latest 300.</p><div class="tablewrap"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Location</th><th>SKU</th><th class="n">Qty</th><th class="n">Previous</th><th>Device / note</th></tr></thead><tbody>
-    ${rows.map(e => `<tr><td class="small">${dt(e.created_at)}</td><td>${esc(e.user_name || "–")}</td><td>${L[e.event] || esc(e.event)}</td><td>${e.location ? `<span class="tag">${esc(e.location)}</span>` : ""}</td><td>${esc(e.sku || "")}</td><td class="n">${fmt(e.qty)}</td><td class="n">${fmt(e.prev_qty)}</td><td class="small muted">${esc([e.device, e.note].filter(Boolean).join(", "))}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty"><h3>No activity yet</h3></div>`;
+    ${rows.map(e => `<tr><td class="small">${dt(e.created_at)}</td><td>${esc(e.user_name || "–")}</td><td>${L[e.event] || esc(e.event)}</td><td>${e.location ? `<span class="tag">${esc(e.location)}</span>` : ""}</td><td>${esc(e.sku || "")}</td><td class="n">${fmt(e.qty)}</td><td class="n">${fmt(e.prev_qty)}</td><td class="small muted" style="white-space:normal;min-width:160px">${esc([e.note, e.device].filter(Boolean).join(" · "))}${(e.photos || []).length ? ` <button class="linkbtn small" data-act="photos" data-p="${esc(JSON.stringify(e.photos))}" data-t="${esc(`${L[e.event] || e.event}: ${e.location || ""} ${e.sku || ""}${e.note ? " · " + e.note : ""}`)}">Photo${e.photos.length === 1 ? "" : "s"} (${e.photos.length})</button>` : ""}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty"><h3>No activity yet</h3></div>`;
 }
 
 /* ---------- settings ---------- */
@@ -431,7 +445,9 @@ function tabSettings(s) {
       <label class="field">Site<input name="site" value="${esc(s.site)}" ${locked ? "disabled" : ""}></label>
       <label class="field">Zone<input name="zone" value="${esc(s.zone)}" ${locked ? "disabled" : ""}></label>
       <label class="field">Tolerance (%)<input name="tol" type="number" min="0" step="0.1" value="${esc(s.tolerance_pct)}" ${locked ? "disabled" : ""}></label>
-      <label class="check" style="grid-column:1/-1"><input type="checkbox" name="blind" ${s.blind ? "checked" : ""} ${locked ? "disabled" : ""}> Blind count</label>
+      <label class="check" style="grid-column:1/-1"><input type="checkbox" name="blind" ${s.blind ? "checked" : ""} ${locked ? "disabled" : ""}> Blind count (nobody sees the system quantity on the phone, supervisors included)</label>
+      <label class="check" style="grid-column:1/-1"><input type="checkbox" name="rc_other" ${s.recount_other ? "checked" : ""} ${locked ? "disabled" : ""}> Recounts must be done by a different operator than the first count</label>
+      <label class="field">Type-again check above (%), 0 = off<input name="recheck" type="number" min="0" step="0.5" value="${esc(s.recheck_pct ?? 5)}" ${locked ? "disabled" : ""}></label>
       <div style="grid-column:1/-1">${countOptions(s, locked)}</div>
       ${locked ? `<p class="hint" style="grid-column:1/-1">This count is reconciled, so its settings are locked.</p>` : `<div class="row" style="grid-column:1/-1"><button class="btn primary" type="submit">Save settings</button></div>`}
     </form>
@@ -454,13 +470,15 @@ async function exportSession(s) {
   try {
     const rows = []; let from = 0;
     for (;;) { const d = await q(sb.from("count_lines_v").select("*").eq("session_id", s.id).order("seq").order("id").range(from, from + 999)); rows.push(...d); if (d.length < 1000) break; from += 1000; }
-    const lines = rows.map(l => ({"Walk #": l.seq, Location: l.location, SKU: l.sku, Barcode: l.barcode, Batch: l.batch, "Mfg date": l.mfg_date || "", "Expiry date": l.expiry_date || "", Description: l.description, UOM: l.uom, "System qty": +l.system_qty, "Counted qty": l.counted_qty == null ? "" : +l.counted_qty, Variance: l.variance == null ? "" : +l.variance, "Variance %": l.variance_pct == null ? "" : +l.variance_pct, "Unit cost": +l.unit_cost, "Variance value": l.variance_value == null ? "" : Math.round(l.variance_value * 100) / 100, Status: STATUS_LABEL[l.status], "Line type": l.is_found ? (l.expected_location ? "Misplaced" : "Excess") : "Expected", "System location": l.expected_location || "", Remarks: l.remarks || "", "Count round": l.count_round, "Counted by": l.counted_by_name || "", "Counted at": l.counted_at ? new Date(l.counted_at) : ""}));
-    const adj = lines.filter(l => l.Variance !== "" && l.Variance !== 0).map(l => ({Location: l.Location, SKU: l.SKU, Batch: l.Batch, "Expiry date": l["Expiry date"], UOM: l.UOM, "Adjust by": l.Variance, "New qty": l["Counted qty"], "Value": l["Variance value"]}));
+    const lines = rows.map(l => ({"Walk #": l.seq, Location: l.location, SKU: l.sku, Barcode: l.barcode, Batch: l.batch, "Mfg date": l.mfg_date || "", "Expiry date": l.expiry_date || "", Description: l.description, UOM: l.uom, "System qty": +l.system_qty, "Counted qty (good)": l.counted_qty == null ? "" : +l.counted_qty, "Damaged qty": +(l.damaged_qty || 0), "Damage reason": l.damage_reason || "", "Damage condition": l.damage_note || "", "Damage photos": (l.damage_photos || []).length, Variance: l.variance == null ? "" : +l.variance, "Variance %": l.variance_pct == null ? "" : +l.variance_pct, "Unit cost": +l.unit_cost, "Variance value": l.variance_value == null ? "" : Math.round(l.variance_value * 100) / 100, Status: STATUS_LABEL[l.status], "Line type": l.is_found ? (l.expected_location ? "Misplaced" : "Excess") : "Expected", "System location": l.expected_location || "", Remarks: l.remarks || "", "Count round": l.count_round, "Counted by": l.counted_by_name || "", "Counted at": l.counted_at ? new Date(l.counted_at) : ""}));
+    const adj = lines.filter(l => l.Variance !== "" && l.Variance !== 0).map(l => ({Location: l.Location, SKU: l.SKU, Batch: l.Batch, "Expiry date": l["Expiry date"], UOM: l.UOM, "Adjust by": l.Variance, "New qty": l["Counted qty (good)"], "Of which damaged": l["Damaged qty"], "Damage reason": l["Damage reason"], "Value": l["Variance value"]}));
     const summary = [["Count", s.name], ["Site", s.site], ["Zone", s.zone], ["Status", SESSION_LABEL[s.status]], ["Stock file", s.source_file || ""], ["Tolerance %", +s.tolerance_pct], ["Lines", s.lines_total], ["Counted", s.lines_counted], ["Within tolerance", s.lines_within], ["Out of tolerance", s.lines_out], ["Accepted", s.lines_accepted], ["Excess and misplaced lines", s.found_lines], ["Net units", +s.net_units], ["Net value", +s.net_value], ["Absolute value", +s.abs_value], ["Exported", new Date()], ["Exported by", S.me.full_name]];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summary), "Summary");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(lines), "All lines");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(adj.length ? adj : [{Note: "No variances"}]), "Adjustments");
+    const reps = await q(sb.from("event_list").select("*").eq("session_id", s.id).eq("event", "not_on_list").order("created_at"));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reps.length ? reps.map(e => ({Reported: new Date(e.created_at), By: e.user_name || "", Location: e.location || "", "Barcode / SKU": e.sku || "", Note: e.note || "", Photos: (e.photos || []).length})) : [{Note: "No items reported"}]), "Reported items");
     saveWorkbook(wb, `${s.name.replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-") || "cycle-count"}.xlsx`);
   } catch (e) { fail(e); }
 }
@@ -537,6 +555,8 @@ document.addEventListener("click", async e => {
     case "do-upload": doUpload(); break;
     case "cancel-upload": pending = null; tabUpload(s); break;
     case "vfilter": V.filter = b.dataset.f; V.page = 0; V.sel = new Set(); tabVariances(s); break;
+    case "vfilter-damaged": V.filter = "damaged"; V.page = 0; V.sel = new Set(); go(`count/${s.id}/variances`); break;
+    case "photos": showPhotos(JSON.parse(b.dataset.p || "[]"), b.dataset.t || "Photos"); break;
     case "vpage": V.page += +b.dataset.d; loadVariances(s); break;
     case "recount-sel": case "accept-sel": case "unaccept-sel": {
       const ids = [...V.sel]; if (!ids.length) { toast("Select lines first.", true); break; }

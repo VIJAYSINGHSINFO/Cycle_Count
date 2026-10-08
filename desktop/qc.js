@@ -32,20 +32,26 @@ async function pageList(main) {
     rows = await C.q(qq);
   } catch (e) { C.fail(e); }
   let all = [];
-  try { all = await C.q(C.sb.from("qc_order_list").select("status,assigned_to,finished_at,closed_at,units_over,created_at").gte("created_at", new Date(Date.now() - 7 * 864e5).toISOString()).limit(5000)); } catch {}
+  // Open orders count whatever their age (an order short for 2 weeks is still short); only "passed today" and "set aside" use dates.
+  let recent = [];
+  try {
+    [all, recent] = await Promise.all([
+      C.q(C.sb.from("qc_order_list").select("status,assigned_to").in("status", ["pending", "in_progress", "short"]).limit(10000)),
+      C.q(C.sb.from("qc_order_list").select("status,finished_at,units_over").gte("updated_at", new Date(Date.now() - 7 * 864e5).toISOString()).limit(10000))]);
+  } catch {}
   const today = new Date().toISOString().slice(0, 10);
   const cnt = f => all.filter(f).length;
   const note = V.note; V.note = null;
   main.innerHTML = `
     <div class="pagehead"><div><h1>Order QC</h1><p class="muted small" style="margin:4px 0 0">Upload picked orders. Operators scan every unit in the mobile app before dispatch; extra units are refused and shortages are sent back for picking.</p></div>
-      <div class="row"><button class="btn" data-qa="export-list" ${rows.length ? "" : "disabled"}>Export to Excel</button><a class="btn go" href="#/qc/upload">Upload orders</a></div></div>
+      <div class="row"><button class="btn" data-qa="picklist-all" ${cnt(o => o.status === "short") ? "" : "disabled title='No orders are short'"}>Short pick list</button><button class="btn" data-qa="export-list" ${rows.length ? "" : "disabled"}>Export to Excel</button><a class="btn go" href="#/qc/upload">Upload orders</a></div></div>
     ${note ? `<div class="banner ok"><span>${C.esc(note)}</span></div>` : ""}
     <div class="stats">
       <div class="stat"><div class="l">Waiting for QC</div><div class="v">${C.fmt(cnt(o => o.status === "pending"))}</div></div>
       <div class="stat"><div class="l">In QC now</div><div class="v">${C.fmt(cnt(o => o.status === "in_progress" && o.assigned_to))}</div></div>
       <div class="stat"><div class="l">Short, waiting for pick</div><div class="v ${cnt(o => o.status === "short") ? "var-neg" : ""}">${C.fmt(cnt(o => o.status === "short"))}</div></div>
-      <div class="stat"><div class="l">Passed today</div><div class="v">${C.fmt(cnt(o => o.status === "passed" && String(o.finished_at || "").slice(0, 10) === today))}</div></div>
-      <div class="stat"><div class="l">Extra units set aside, last 7 days</div><div class="v">${C.fmt(all.reduce((a, o) => a + N(o.units_over), 0))}</div></div>
+      <div class="stat"><div class="l">Passed today</div><div class="v">${C.fmt(recent.filter(o => o.status === "passed" && String(o.finished_at || "").slice(0, 10) === today).length)}</div></div>
+      <div class="stat"><div class="l">Extra units set aside, last 7 days</div><div class="v">${C.fmt(recent.reduce((a, o) => a + N(o.units_over), 0))}</div></div>
     </div>
     <div class="toolbar"><div class="chips">${[["open", "Open"], ["short", "Short"], ["in_progress", "In QC"], ["passed", "Passed"], ["closed", "Released or cancelled"], ["all", "All"]].map(([k, l]) => `<button class="chip" aria-pressed="${V.filter === k}" data-qa="filter" data-f="${k}">${l}</button>`).join("")}</div>
       <input class="search" id="qcsearch" placeholder="Search order, reference or customer" value="${C.esc(V.search)}"></div>
@@ -86,7 +92,7 @@ async function pageOrder(main, id) {
       <span class="muted small">${C.esc([o.reference && "Ref " + o.reference, o.storer, o.customer].filter(Boolean).join(" · ") || "No details")}. Tote scan ${o.tote_mode === "off" ? "off" : o.tote_mode}, ${o.allow_qty ? "operators may type quantities" : "every unit scanned"}. Uploaded ${C.dt(o.created_at)}${o.source_file ? ` from ${C.esc(o.source_file)}` : ""}.</span></div>
       <div class="row"><span class="pill ${PILL[o.status]}">${statusLabel(o)}</span>
         ${open && o.assigned_to ? `<button class="btn" data-qa="act" data-a="unlock">Unlock</button>` : ""}
-        ${o.status === "short" ? `<button class="btn go" data-qa="act" data-a="release">Release short</button>` : ""}
+        ${o.status === "short" ? `<button class="btn" data-qa="picklist-order">Print short pick list</button><button class="btn go" data-qa="act" data-a="release">Release short</button>` : ""}
         ${open ? `<button class="btn ghost" data-qa="act" data-a="reset">Reset scans</button><button class="btn danger" data-qa="act" data-a="cancel">Cancel order</button>` : ""}
         <button class="btn" data-qa="export-order">Export</button></div></div>
     ${banner}
@@ -300,6 +306,28 @@ async function exportRows(orderRows, name) {
   } catch (e) { C.fail(e); }
 }
 
+/* ---------- short pick list: what the picker must still pick and pack ---------- */
+async function printPickList(orders) {
+  if (!orders.length) return C.toast("No orders are short.", true);
+  let lines = [];
+  try { for (let i = 0; i < orders.length; i += 200) lines.push(...await C.q(C.sb.from("qc_line_v").select("*").in("order_id", orders.slice(i, i + 200).map(o => o.id)).order("line_no"))); }
+  catch (e) { return C.fail(e); }
+  const short = lines.filter(l => N(l.expected_qty) > N(l.scanned_qty));
+  const by = new Map(orders.map(o => [o.id, []])); short.forEach(l => by.get(l.order_id) && by.get(l.order_id).push(l));
+  const units = short.reduce((a, l) => a + N(l.expected_qty) - N(l.scanned_qty), 0);
+  let p = $("#qcprint"); if (!p) { p = document.createElement("div"); p.id = "qcprint"; document.body.appendChild(p); }
+  p.innerHTML = `<h1>Short pick list</h1><p>${C.esc(new Date().toLocaleString())} · ${C.fmt(orders.length)} order${orders.length === 1 ? "" : "s"} · ${C.fmt(units)} unit${units === 1 ? "" : "s"} to pick · Printed by ${C.esc(C.me.full_name || "")}</p>
+    ${orders.filter(o => by.get(o.id).length).map(o => `<section><h2>${C.esc(o.order_no)} <small>${C.esc([o.reference, o.storer, o.customer].filter(Boolean).join(" · "))}</small></h2>
+      <table><thead><tr><th>SKU</th><th>Description</th><th>Barcode</th><th>Batch</th><th>UOM</th><th class="n">Ordered</th><th class="n">Checked</th><th class="n">To pick</th><th>Picked ✓</th></tr></thead><tbody>
+      ${by.get(o.id).map(l => `<tr><td><strong>${C.esc(l.sku)}</strong></td><td>${C.esc(l.description)}</td><td>${C.esc(l.barcode || "")}</td><td>${C.esc(l.batch || "")}</td><td>${C.esc(l.uom || "")}</td><td class="n">${C.fmt(l.expected_qty)}</td><td class="n">${C.fmt(l.scanned_qty)}</td><td class="n"><strong>${C.fmt(N(l.expected_qty) - N(l.scanned_qty))}</strong></td><td class="box"></td></tr>`).join("")}
+      </tbody></table><p class="sign">Picked by: ____________________ &nbsp; Time: __________ &nbsp; Handed to QC: ____________________</p></section>`).join("")}`;
+  document.body.classList.add("qc-printing");
+  const done = () => { document.body.classList.remove("qc-printing"); window.removeEventListener("afterprint", done); };
+  window.addEventListener("afterprint", done);
+  try { window.print(); } catch { C.toast("Your browser blocked printing here. Open the console in its own tab to print.", true); }
+  setTimeout(done, 60000);
+}
+
 /* ---------- clicks ---------- */
 document.addEventListener("click", e => {
   const b = e.target.closest("[data-qa]"); if (!b || !C) return;
@@ -310,6 +338,8 @@ document.addEventListener("click", e => {
     case "act": act(b.dataset.a); break;
     case "do-upload": doUpload(b); break;
     case "cancel-upload": V.pending = null; pageUpload($("#main")); break;
+    case "picklist-all": (async () => { try { printPickList(await C.q(C.sb.from("qc_order_list").select("*").eq("status", "short").order("short_at"))); } catch (err) { C.fail(err); } })(); break;
+    case "picklist-order": printPickList([C.cache.order.o]); break;
     case "export-list": exportRows(C.cache.list || [], `order-qc-${new Date().toISOString().slice(0, 10)}.xlsx`); break;
     case "export-order": { const o = C.cache.order.o; exportRows([o], `order-qc-${o.order_no.replace(/[^\w\-]+/g, "_")}.xlsx`); break; }
   }

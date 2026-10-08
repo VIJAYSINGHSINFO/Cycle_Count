@@ -50,8 +50,15 @@ function seed() {
   const events = [{id: 1, session_id: "s-open", line_id: null, event: "import", qty: lines.filter(l => l.session_id === "s-open").length, prev_qty: null, note: "WMS_onhand_A01_2026-09-30.xlsx", user_id: "u-sup", device: null, client_id: null, created_at: "2026-09-30T05:31:00Z"},
                   {id: 2, session_id: "s-open", line_id: null, event: "status", note: "draft -> open", user_id: "u-sup", created_at: "2026-09-30T06:00:00Z"}];
   const reconciliations = [{id: "r1", session_id: "s-rec", lines_total: 12, lines_counted: 12, lines_within: 11, lines_out: 0, lines_accepted: 2, found_lines: 0, accuracy_pct: 91.67, net_units: -4, net_value: -118.4, abs_value: 118.4, wms_reference: "ADJ-2026-0917", notes: "Two bays short on paracetamol; damaged cartons written off.", approved_by: "u-sup", approved_at: "2026-09-16T14:02:00Z"}];
+  // two variances at A01-07 sent back for recount (Priya counted them first)
+  let evn = 2;
+  lines.filter(l => l.session_id === "s-open" && /^A01-07-/.test(l.location) && l.counted_qty != null && l.counted_qty !== l.system_qty).slice(0, 2).forEach(l => {
+    events.push({id: ++evn, session_id: "s-open", line_id: l.id, event: "recount_request", prev_qty: l.counted_qty, user_id: "u-sup", created_at: "2026-09-30T08:10:00Z"});
+    Object.assign(l, {first_counted_by: l.counted_by, counted_qty: null, counted_by: null, counted_at: null, recount_requested: true}); });
+  lines.forEach(l => { l.damaged_qty = l.damaged_qty || 0; l.damage_photos = l.damage_photos || []; });
+  sessions.forEach(x => { x.recount_other = false; x.recheck_pct = 5; });
   const presence = {"walk-s-open": {"u-priya:demo": [{loc: "A01-04-A", name: "Priya Nair"}]}};
-  return {users, sessions, lines, events, reconciliations, presence, id, evId: 10, clock, channels: [], sessionFor: {}};
+  return {users, sessions, lines, events, reconciliations, presence, id, evId: 10, clock, channels: [], sessionFor: {}, photos: {}};
 }
 
 /* ---------- derived views ---------- */
@@ -186,7 +193,8 @@ function lineStatus(l, tol) {
 function stats(s) {
   const L = S.lines.filter(l => l.session_id === s.id), tol = +s.tolerance_pct, c = L.filter(l => l.counted_qty != null);
   const st = L.map(l => lineStatus(l, tol)), locs = new Set(L.map(l => l.location)), open = new Set(L.filter(l => l.counted_qty == null).map(l => l.location));
-  return {lines_total: L.length, lines_counted: c.length, locations_total: locs.size, locations_open: open.size,
+  return {damaged_units: c.reduce((x, l) => x + +(l.damaged_qty || 0), 0), reported_items: S.events.filter(e => e.session_id === s.id && e.event === "not_on_list").length,
+    lines_total: L.length, lines_counted: c.length, locations_total: locs.size, locations_open: open.size,
     lines_within: st.filter(x => x === "match" || x === "within").length, lines_out: st.filter(x => x === "out").length,
     lines_accepted: L.filter(l => l.accepted && l.counted_qty != null).length, lines_recount: st.filter(x => x === "recount").length,
     found_lines: L.filter(l => l.is_found).length, net_units: c.reduce((a, l) => a + (l.counted_qty - l.system_qty), 0),
@@ -201,7 +209,7 @@ const views = {
     return {...l, status: lineStatus(l, +s.tolerance_pct), variance: v, variance_pct: v == null ? null : +l.system_qty === 0 ? (l.counted_qty ? 100 : 0) : Math.round(v / Math.abs(l.system_qty) * 10000) / 100,
       variance_value: v == null ? null : v * l.unit_cost, sort_weight: Math.abs(v || 0) * Math.max(l.unit_cost, 0.0001), counted_by_name: uname(l.counted_by), session_name: s.name, session_site: s.site, session_status: s.status, session_created_at: s.created_at}; }),
   reconciliation_list: () => S.reconciliations.map(r => { const s = S.sessions.find(x => x.id === r.session_id); return {...r, session_name: s.name, site: s.site, zone: s.zone, source_file: s.source_file, session_created_at: s.created_at, closed_at: s.closed_at, approved_by_name: uname(r.approved_by)}; }),
-  event_list: () => S.events.map(e => { const l = S.lines.find(x => x.id === e.line_id); return {...e, user_name: uname(e.user_id), location: l ? l.location : null, sku: l ? l.sku : null}; }),
+  event_list: () => S.events.map(e => { const l = S.lines.find(x => x.id === e.line_id); return {...e, user_name: uname(e.user_id), location: l ? l.location : e.location || null, sku: l ? l.sku : e.code || null}; }),
   qc_orders: () => S.qcOrders, qc_lines: () => S.qcLines, qc_order_list: qcList,
   qc_line_v: () => S.qcLines.map(l => { const o = S.qcOrders.find(x => x.id === l.order_id) || {}; return {...l, short_qty: l.expected_qty - l.scanned_qty, order_no: o.order_no, reference: o.reference, storer: o.storer, customer: o.customer, order_status: o.status, order_created_at: o.created_at}; }),
   qc_event_list: () => S.qcEvents.map(e => { const l = S.qcLines.find(x => x.id === e.line_id), o = S.qcOrders.find(x => x.id === e.order_id) || {}; return {...e, user_name: uname(e.user_id), sku: l ? l.sku : null, order_no: o.order_no}; })
@@ -222,6 +230,7 @@ function builder(table, me) {
     in(c, vs) { st.filters.push(r => vs.includes(r[c])); return api; },
     is(c, v) { st.filters.push(r => v === null ? r[c] == null : r[c] === v); return api; },
     not(c, op, v) { st.filters.push(r => op === "is" && v === null ? r[c] != null : r[c] !== v); return api; },
+    gt(c, v) { st.filters.push(r => r[c] != null && +r[c] > v); return api; },
     gte(c, v) { st.filters.push(r => r[c] != null && r[c] >= v); return api; },
     lte(c, v) { st.filters.push(r => r[c] != null && r[c] <= v); return api; },
     ilike(c, p) { const re = like(p); st.filters.push(r => re.test(String(r[c] ?? ""))); return api; },
@@ -238,7 +247,7 @@ function builder(table, me) {
     if (st.op === "insert") {
       if (!staff) return {data: null, error: {message: "Permission denied", code: "42501"}};
       const out = st.payload.map(r => {
-        if (table === "count_sessions") { const s = {id: "s-" + Math.random().toString(36).slice(2, 8), site: "", zone: "", tolerance_pct: 2, blind: true, confirm_location: true, rack_grouping: "last_segment", excess_batch: "optional", excess_mfg: "optional", excess_expiry: "required", status: "draft", source_file: null, created_by: me.id, created_at: tick(), opened_at: null, closed_at: null, closed_by: null, ...r}; S.sessions.push(s); return s; }
+        if (table === "count_sessions") { const s = {id: "s-" + Math.random().toString(36).slice(2, 8), site: "", zone: "", tolerance_pct: 2, blind: true, recount_other: false, recheck_pct: 5, confirm_location: true, rack_grouping: "last_segment", excess_batch: "optional", excess_mfg: "optional", excess_expiry: "required", status: "draft", source_file: null, created_by: me.id, created_at: tick(), opened_at: null, closed_at: null, closed_by: null, ...r}; S.sessions.push(s); return s; }
         if (table === "count_lines") { const l = {id: ++S.id, barcode: "", batch: "", units_per_case: 1, mfg_date: null, expiry_date: null, description: "", uom: "", unit_cost: 0, counted_qty: null, counted_by: null, counted_at: null, count_round: 0, recount_requested: false, accepted: false, accepted_by: null, accepted_at: null, is_found: false, expected_location: null, remarks: null, updated_at: tick(), ...r}; S.lines.push(l); return l; }
         return r;
       });
@@ -277,17 +286,23 @@ function rpc(name, a, me) {
       return {data: S.sessions.filter(s => s.status === "open").map(s => ({...s, ...stats(s)})), error: null};
     case "mobile_lines": {
       const s = sess(a.p_session); if (!me || !me.active || !s || (s.status !== "open" && !staff)) return {data: [], error: null};
-      const show = !s.blind || staff;
+      const show = !s.blind;   // blind is blind on the phone for every role
       const rows = S.lines.filter(l => l.session_id === s.id && l.id > (a.p_after_id || 0) && (!a.p_since || l.updated_at > a.p_since)).sort((x, y) => x.id - y.id).slice(0, a.p_limit || 1000)
-        .map(l => ({id: l.id, seq: l.seq, location: l.location, sku: l.sku, barcode: l.barcode, batch: l.batch, description: l.description, uom: l.uom, units_per_case: l.units_per_case || 1, system_qty: show ? l.system_qty : null, counted_qty: l.counted_qty, counted_by_name: uname(l.counted_by), counted_at: l.counted_at, recount_requested: l.recount_requested, is_found: l.is_found, updated_at: l.updated_at}));
+        .map(l => ({id: l.id, seq: l.seq, location: l.location, sku: l.sku, barcode: l.barcode, batch: l.batch, description: l.description, uom: l.uom, units_per_case: l.units_per_case || 1, system_qty: show && !l.recount_requested ? l.system_qty : null, counted_qty: l.counted_qty, counted_by_name: uname(l.counted_by), counted_at: l.counted_at, recount_requested: l.recount_requested, is_found: l.is_found, updated_at: l.updated_at, damaged_qty: +(l.damaged_qty || 0), damage_reason: l.damage_reason || null, damage_note: l.damage_note || null, damage_photos: l.damage_photos || [], recount_blocked: !!(s.recount_other && l.recount_requested && l.first_counted_by === me.id), ref_v: l.is_found ? null : l.system_qty * 97 + l.id * 13}));
       return {data: rows, error: null};
     }
     case "submit_counts": {
       const s = sess(a.p_session); if (!s || s.status !== "open") return E("This count is not open for counting");
       let saved = 0, dup = 0;
       for (const e of a.p_entries) { if (e.client_id && S.events.some(x => x.client_id === e.client_id)) { dup++; continue; } const l = S.lines.find(x => x.id === e.line_id && x.session_id === s.id); if (!l) continue;
-        ev(s.id, l.id, "count", {qty: e.qty, prev_qty: l.counted_qty, device: a.p_device, client_id: e.client_id});
-        Object.assign(l, {counted_qty: +e.qty, counted_by: me.id, counted_at: e.client_ts || tick(), count_round: l.count_round + 1, recount_requested: false, accepted: false, updated_at: tick()}); saved++; }
+        if (s.recount_other && l.recount_requested && l.first_counted_by === me.id) return E(`${l.sku} at ${l.location} must be recounted by a different operator than the first count`);
+        const dmg = +(e.damaged_qty || 0), reason = String(e.damage_reason || "").trim(), photos = e.photos || [];
+        if (dmg < 0) return E("Damaged quantity can't be below 0");
+        if (dmg > 0 && !reason) return E(`Choose a reason for the damaged units of ${l.sku} at ${l.location}`);
+        if (dmg > 0 && !photos.length) return E(`Take a photo of the damaged units of ${l.sku} at ${l.location}`);
+        ev(s.id, l.id, "count", {qty: e.qty, prev_qty: l.counted_qty, device: a.p_device, client_id: e.client_id, note: [e.first_entry == null ? null : +e.first_entry === +e.qty ? `Confirmed by typing twice: ${e.qty}` : `Re-entered: first ${e.first_entry}, final ${e.qty}`, dmg > 0 ? `Damaged ${dmg}: ${reason}` : null].filter(Boolean).join("; ") || null, photos: dmg > 0 ? photos : null});
+        Object.assign(l, {counted_qty: +e.qty, counted_by: me.id, counted_at: e.client_ts || tick(), count_round: l.count_round + 1, recount_requested: false, accepted: false, updated_at: tick(),
+          damaged_qty: dmg, damage_reason: dmg > 0 ? reason : null, damage_note: dmg > 0 ? (String(e.damage_note || "").trim() || null) : null, damage_photos: dmg > 0 ? photos : []}); saved++; }
       return {data: {saved, duplicates: dup, skipped: 0}, error: null};
     }
     case "add_excess": {
@@ -305,8 +320,12 @@ function rpc(name, a, me) {
       return {data: l.id, error: null};
     }
     case "request_recount": { if (!staff) return E("Only supervisors can request recounts"); let n = 0;
-      S.lines.filter(l => l.session_id === a.p_session && a.p_line_ids.includes(l.id) && l.counted_qty != null).forEach(l => { ev(a.p_session, l.id, "recount_request", {prev_qty: l.counted_qty}); Object.assign(l, {counted_qty: null, counted_by: null, counted_at: null, recount_requested: true, accepted: false, updated_at: tick()}); n++; });
+      S.lines.filter(l => l.session_id === a.p_session && a.p_line_ids.includes(l.id) && l.counted_qty != null).forEach(l => { ev(a.p_session, l.id, "recount_request", {prev_qty: l.counted_qty}); Object.assign(l, {first_counted_by: l.first_counted_by || l.counted_by, counted_qty: null, counted_by: null, counted_at: null, recount_requested: true, accepted: false, damaged_qty: 0, damage_reason: null, damage_note: null, damage_photos: [], updated_at: tick()}); n++; });
       return {data: n, error: null}; }
+    case "report_not_on_list": { const s = sess(a.p_session); if (!s || s.status !== "open") return E("This count is not open for counting");
+      if (a.p_client_id && S.events.some(x => x.client_id === a.p_client_id)) return {data: null, error: null};
+      ev(s.id, null, "not_on_list", {location: String(a.p_location || "").trim(), code: String(a.p_code || "").trim(), note: String(a.p_note || "").trim() || null, photos: a.p_photos || [], device: a.p_device, client_id: a.p_client_id});
+      return {data: null, error: null}; }
     case "set_accepted": { if (!staff) return E("Only supervisors can accept variances"); let n = 0;
       S.lines.filter(l => l.session_id === a.p_session && a.p_line_ids.includes(l.id) && l.counted_qty != null).forEach(l => { Object.assign(l, {accepted: a.p_accepted, accepted_by: a.p_accepted ? me.id : null, updated_at: tick()}); ev(a.p_session, l.id, a.p_accepted ? "accept" : "unaccept"); n++; });
       return {data: n, error: null}; }
@@ -350,7 +369,18 @@ function createClient() {
         presenceState() { return S.presence[name] || {}; }};
       return ch;
     },
-    removeChannel(ch) { S.channels = S.channels.filter(c => c !== ch); }
+    removeChannel(ch) { S.channels = S.channels.filter(c => c !== ch); },
+    storage: {from: bucket => ({
+      async upload(path, blob) {
+        if (host.__CC_DEMO_OFFLINE && role === "counter") return {data: null, error: {message: "Failed to fetch"}};
+        if (!S.photos) S.photos = {};
+        if (S.photos[path]) return {data: null, error: {message: "The resource already exists", statusCode: "409"}};
+        S.photos[path] = await new Promise(r => { const f = new FileReader(); f.onload = () => r(f.result); f.readAsDataURL(blob); });
+        (S.photoDocs || (S.photoDocs = [])).push({id: "p" + path.replace(/[^A-Za-z0-9]/g, "_").slice(-120), path, data: S.photos[path]});   // shared by the test link
+        return {data: {path}, error: null};
+      },
+      async createSignedUrl(path) { const d = (S.photoDocs || []).find(x => x.path === path), u = (S.photos || {})[path] || (d && d.data); return u ? {data: {signedUrl: u}, error: null} : {data: null, error: {message: "Photo not uploaded yet"}}; }
+    })}
   };
 }
 window.supabase = {createClient};

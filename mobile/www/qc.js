@@ -193,7 +193,8 @@ function render() {
     const passed = Q.view === "passed", sh = Q.lines.filter(l => l.scanned_qty < l.expected_qty);
     body = `<div class="panel entry-empty"><div class="${passed ? "big-ok" : "big-bad"}">${passed ? "✓" : "!"}</div>
       <h3>${passed ? `Order ${esc(o.order_no)} passed QC` : `Order ${esc(o.order_no)} is waiting for pick`}</h3>
-      <p>${passed ? `${fmt(t.scan)} units in ${fmt(Q.lines.length)} lines checked.` : `Missing: ${sh.map(l => `${fmt(l.expected_qty - l.scanned_qty)} × ${esc(l.sku)}`).join(", ")}. When the picker brings them, scan the order number again and scan the missing units.`}</p>
+      <p>${passed ? `${fmt(t.scan)} units in ${fmt(Q.lines.length)} lines checked.` : `When the picker brings these, scan the order number again and scan them.`}</p>
+      ${passed ? "" : `<h3 style="text-align:left;margin:14px 0 6px">Short pick list: pick and pack</h3><ul class="qc-lines" style="text-align:left">${sh.map(l => `<li class="qc-row part"><div class="qc-rowin"><span class="qc-id"><strong>${esc(l.sku)}</strong> ${esc(l.description || "")}<br><span class="muted small">${esc([l.barcode, l.batch && "Batch " + l.batch, l.uom].filter(Boolean).join(" · "))}</span></span><span class="qc-n bad">${fmt(l.expected_qty - l.scanned_qty)}</span></div></li>`).join("")}</ul><p class="hint" style="text-align:left">Your supervisor can print this list from the console.</p>`}
       ${t.over ? `<p class="qc-aside" style="text-align:left">Return ${fmt(t.over)} set-aside unit${t.over === 1 ? "" : "s"} to stock: ${Q.lines.filter(l => l.over_qty).map(l => `${fmt(l.over_qty)} × ${esc(l.sku)}`).join(", ")}.</p>` : ""}</div>
       <label class="sr" for="qcscan">Next order number</label>${scanBox("Scan the next order number", false)}`;
     dock = `<button class="btn primary save" data-qc="home">Back to orders</button>`;
