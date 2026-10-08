@@ -77,28 +77,33 @@ function renderShell() {
   $("#root").innerHTML = `<div class="shell">
     <nav class="side" aria-label="Main">
       <div class="brand">${MARK_NAVY}<span class="wordmark">stowra</span></div>
+      <div class="orgname" id="orgname"></div>
       <a href="#/counts" data-nav="counts">Counts</a>
       <a href="#/history" data-nav="history">Reconciliation history</a>
       <a href="#/items" data-nav="items">Item history</a>
+      <a href="#/gate" data-nav="gate">Gate and yard</a>
       <a href="#/qc" data-nav="qc">Order QC</a>
       <a href="#/labels" data-nav="labels">Barcode labels</a>
-      ${S.me.role === "admin" ? `<a href="#/users" data-nav="users">Users</a>` : ""}
+      ${S.me.role === "admin" ? `<a href="#/users" data-nav="users">Users</a><a href="#/settings" data-nav="settings">Settings</a>` : ""}
       <div class="me">${esc(S.me.full_name)}<br><span style="opacity:.7">${S.me.role === "admin" ? "Administrator" : "Supervisor"}</span><br><button data-act="signout">Sign out</button></div>
     </nav>
     <main class="main" id="main"></main></div>`;
+  loadOrgName();
   onRoute();
 }
 window.addEventListener("hashchange", () => { if ($("#main")) onRoute(); });
+async function loadOrgName() { try { const o = await q(sb.from("org_settings").select("company_name").eq("id", 1).single()); const el = $("#orgname"); if (el) el.textContent = o.company_name; document.title = `Stowra · ${o.company_name}`; } catch {} }
+window.addEventListener("stowra-org", loadOrgName);
 function onRoute() {
   stopTimer();
   const [page, id, tab] = route();
   $$(".side a").forEach(a => a.setAttribute("aria-current", a.dataset.nav === page ? "page" : "false"));
   const m = $("#main"); m.innerHTML = `<div class="loading">Loading…</div>`;
-  ({counts: pageCounts, count: () => pageCount(id, tab || "overview"), history: pageHistory, items: pageItems, labels: () => window.CCLabels.page($("#main"), {sb, q, toast, parseDelimited}), qc: () => window.CCQc.page($("#main"), qcCtx(), id), users: pageUsers}[page] || pageCounts)();
+  ({counts: pageCounts, count: () => pageCount(id, tab || "overview"), history: pageHistory, items: pageItems, labels: () => window.CCLabels.page($("#main"), {sb, q, toast, parseDelimited}), qc: () => window.CCQc.page($("#main"), qcCtx(), id), gate: () => window.CCGate.page($("#main"), qcCtx(), id), settings: () => window.CCGate.page($("#main"), qcCtx(), null, "settings"), users: pageUsers}[page] || pageCounts)();
 }
 
 const QC_CACHE = {};
-function qcCtx() { return {sb, q, toast, fail, run, esc, fmt, dt, go, route, readTable, saveWorkbook, cache: QC_CACHE, me: S.me, setTimer: (fn, ms) => { stopTimer(); S.timer = setInterval(fn, ms); }}; }
+function qcCtx() { return {sb, q, toast, fail, run, esc, fmt, dt, go, route, readTable, saveWorkbook, confirmTwice, cache: QC_CACHE, me: S.me, setTimer: (fn, ms) => { stopTimer(); S.timer = setInterval(fn, ms); }}; }
 
 /* ---------- counts list ---------- */
 async function pageCounts() {
@@ -520,7 +525,7 @@ async function pageUsers() {
     ${pendingN ? `<div class="banner warn"><span>${pendingN} account${pendingN === 1 ? " is" : "s are"} waiting for approval.</span></div>` : ""}
     <div class="tablewrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Site</th><th>Access</th><th></th></tr></thead><tbody>
     ${rows.map(u => `<tr data-uid="${u.id}"><td><input class="search" style="min-width:160px" data-f="full_name" value="${esc(u.full_name)}"></td><td class="small">${esc(u.email || "")}</td>
-      <td><select class="search" style="min-width:0" data-f="role" ${u.id === S.me.id ? "disabled" : ""}>${[["counter", "Operator (mobile: counting and QC)"], ["supervisor", "Supervisor"], ["admin", "Administrator"]].map(([k, l]) => `<option value="${k}" ${u.role === k ? "selected" : ""}>${l}</option>`).join("")}</select></td>
+      <td><select class="search" style="min-width:0" data-f="role" ${u.id === S.me.id ? "disabled" : ""}>${[["counter", "Operator (mobile: counting, QC, docks)"], ["security", "Security (mobile: gate only)"], ["supervisor", "Supervisor"], ["admin", "Administrator"]].map(([k, l]) => `<option value="${k}" ${(u.role === "counter" && u.job === "security" ? "security" : u.role) === k ? "selected" : ""}>${l}</option>`).join("")}</select></td>
       <td><input class="search" style="min-width:100px" data-f="site" value="${esc(u.site)}"></td>
       <td><label class="check"><input type="checkbox" data-f="active" ${u.active ? "checked" : ""} ${u.id === S.me.id ? "disabled" : ""}> ${u.active ? "Active" : "Not approved"}</label></td>
       <td><button class="btn sm" data-act="save-user">Save</button></td></tr>`).join("")}</tbody></table></div>`;
@@ -579,7 +584,7 @@ document.addEventListener("click", async e => {
     case "save-user": {
       const tr = b.closest("tr"), id = tr.dataset.uid, val = f => tr.querySelector(`[data-f="${f}"]`);
       const patch = {full_name: val("full_name").value.trim(), site: val("site").value.trim()};
-      if (id !== S.me.id) { patch.role = val("role").value; patch.active = val("active").checked; }
+      if (id !== S.me.id) { const r = val("role").value; patch.role = r === "security" ? "counter" : r; patch.job = r === "security" ? "security" : "operator"; patch.active = val("active").checked; }
       if (await run(() => q(sb.from("profiles").update(patch).eq("id", id)), "User saved")) pageUsers();
       break;
     }

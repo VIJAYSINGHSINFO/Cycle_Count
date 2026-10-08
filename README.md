@@ -29,6 +29,10 @@ Open `desktop/index.html` or `mobile/www/index.html` in a browser before setting
 6. Misplaced and excess stock need the product details. Batch number, manufacturing date and expiry date can each be set per count to required, optional or not asked; by default expiry is required.
 7. **Location complete** saves anything expected but not scanned as 0 (not found), after asking the operator to confirm. The next location then comes up automatically.
 
+## Gate pass and yard
+
+Security gates vehicles in on the phone (documents checked for expiry, PPE, ASN/PO or order numbers) and sends the driver a QR gate pass on WhatsApp; the warehouse docks the vehicle in and out by scanning it; security gates it out only when it's cleared. The console shows a live dock map and times. Company name, sites and docks are set once in **Settings**. The driver's pass page is in `pass/`. Details: `docs/SETUP-GUIDE.md`, "Version 5".
+
 ## Order QC
 
 Picked orders are uploaded on the console and checked unit by unit on the phone before dispatch. Extra units and products not in the order are refused with a full-screen stop; missing units send the order back for picking until they're scanned, or until a supervisor releases it short with a reason. The database enforces these rules itself (see the Order QC section of `supabase/schema.sql`). Setup and daily use: `docs/SETUP-GUIDE.md`, section **Order QC**.

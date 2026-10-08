@@ -25,6 +25,10 @@ create table if not exists public.profiles (
   active      boolean not null default false,
   created_at  timestamptz not null default now()
 );
+-- Version 5: what the person does on the phone. Security staff only see the gate screens.
+alter table public.profiles add column if not exists job text not null default 'operator';
+alter table public.profiles drop constraint if exists profiles_job_check;
+alter table public.profiles add constraint profiles_job_check check (job in ('operator', 'security'));
 
 -- New sign-ups get a profile. The very first user becomes admin.
 create or replace function public.handle_new_user()
@@ -587,10 +591,11 @@ begin
   limit least(greatest(p_limit, 1), 1000);
 end $$;
 
+drop function if exists public.whoami();
 create or replace function public.whoami()
-returns table (id uuid, full_name text, email text, role app_role, site text, active boolean)
+returns table (id uuid, full_name text, email text, role app_role, site text, active boolean, job text)
 language sql stable security definer set search_path = public as $$
-  select id, full_name, email, role, site, active from profiles where id = auth.uid()
+  select id, full_name, email, role, site, active, job from profiles where id = auth.uid()
 $$;
 
 -- During a recount the operator may only count the SKUs on his list. Anything else he finds there is REPORTED, never counted:
@@ -979,3 +984,247 @@ create policy stowra_photos_upload on storage.objects for insert to authenticate
 drop policy if exists stowra_photos_read on storage.objects;
 create policy stowra_photos_read on storage.objects for select to authenticated
   using (bucket_id = 'stowra-photos' and (public.is_staff() or owner = auth.uid()));
+
+
+-- =====================================================================
+-- ORGANISATION, SITES AND DOCKS (version 5)
+-- The company name lives in ONE place. Screens, gate passes, checklists and reports read it from here,
+-- so changing it here changes it everywhere.
+-- =====================================================================
+create table if not exists public.org_settings (
+  id                 int primary key default 1 check (id = 1),
+  company_name       text not null default 'Your company',
+  pass_base_url      text not null default '',        -- web address of the gate pass page, e.g. https://you.github.io/stowra/pass/
+  yard_alert_minutes int  not null default 120 check (yard_alert_minutes > 0),
+  updated_at         timestamptz not null default now()
+);
+insert into public.org_settings (id) values (1) on conflict (id) do nothing;
+
+create table if not exists public.sites (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  code        text not null default '',
+  active      boolean not null default true,
+  created_at  timestamptz not null default now()
+);
+create unique index if not exists sites_name_idx on public.sites (upper(name));
+
+create table if not exists public.docks (
+  id          uuid primary key default gen_random_uuid(),
+  site_id     uuid not null references public.sites (id) on delete cascade,
+  name        text not null,
+  kind        text not null default 'both' check (kind in ('inbound', 'outbound', 'both')),
+  active      boolean not null default true,
+  sort        int not null default 0
+);
+create unique index if not exists docks_name_idx on public.docks (site_id, upper(name));
+
+alter table public.org_settings enable row level security;
+alter table public.sites enable row level security;
+alter table public.docks enable row level security;
+drop policy if exists org_read on public.org_settings;
+create policy org_read on public.org_settings for select to authenticated using (true);
+drop policy if exists org_write on public.org_settings;
+create policy org_write on public.org_settings for update to authenticated using (public.is_admin()) with check (public.is_admin());
+drop policy if exists sites_read on public.sites;
+create policy sites_read on public.sites for select to authenticated using (true);
+drop policy if exists sites_write on public.sites;
+create policy sites_write on public.sites for all to authenticated using (public.is_admin()) with check (public.is_admin());
+drop policy if exists docks_read on public.docks;
+create policy docks_read on public.docks for select to authenticated using (true);
+drop policy if exists docks_write on public.docks;
+create policy docks_write on public.docks for all to authenticated using (public.is_admin()) with check (public.is_admin());
+grant select, update on public.org_settings to authenticated;
+grant select, insert, update, delete on public.sites, public.docks to authenticated;
+
+-- =====================================================================
+-- GATE PASS (version 5): gate in -> (yard) -> dock in -> dock out -> gate out
+--
+--   in_yard ──> at_dock ──> dock_done ──> out        (inbound and outbound)
+--   in_yard ─────────────────────────────> out        (visits that don't use a dock)
+--   gate in with an expired document or without PPE ──> rejected (recorded, never enters)
+--
+-- Rules the database enforces:
+--   * Gate in needs a valid (not expired) Emirates ID, driving licence and Mulkiya, and PPE confirmed.
+--   * Inbound visits carry the ASN/PO numbers; outbound visits carry the order numbers.
+--   * One vehicle per dock at a time. A dock must belong to the visit's site.
+--   * Gate out only after dock out (for inbound and outbound visits).
+--   * Every step is kept in gate_events with who did it and when.
+-- =====================================================================
+create table if not exists public.gate_visits (
+  id               uuid primary key default gen_random_uuid(),
+  pass_code        text not null unique,
+  site_id          uuid not null references public.sites (id),
+  purpose          text not null check (purpose in ('inbound', 'outbound', 'other')),
+  storer           text not null default '',
+  refs             text[] not null default '{}',     -- inbound: ASN / PO numbers; outbound: order numbers
+  vehicle_plate    text not null,
+  vehicle_type     text not null default '',
+  transporter      text not null default '',
+  driver_name      text not null,
+  driver_mobile    text not null default '',
+  eid_number       text not null default '',
+  eid_expiry       date,
+  licence_number   text not null default '',
+  licence_expiry   date,
+  mulkiya_number   text not null default '',
+  mulkiya_expiry   date,
+  ppe_ok           boolean not null default false,
+  status           text not null default 'in_yard' check (status in ('in_yard', 'at_dock', 'dock_done', 'out', 'rejected')),
+  reject_reason    text,
+  notes            text,
+  gate_in_at       timestamptz not null default now(),
+  gate_in_by       uuid references public.profiles (id) default auth.uid(),
+  dock_id          uuid references public.docks (id),
+  dock_in_at       timestamptz,
+  dock_in_by       uuid references public.profiles (id),
+  dock_out_at      timestamptz,
+  dock_out_by      uuid references public.profiles (id),
+  seal_in          text,                               -- seal number on arrival (inbound)
+  seal_out         text,                               -- seal applied before leaving (outbound)
+  gate_out_at      timestamptz,
+  gate_out_by      uuid references public.profiles (id),
+  updated_at       timestamptz not null default now()
+);
+create index if not exists gate_visits_status_idx on public.gate_visits (site_id, status, gate_in_at);
+create index if not exists gate_visits_plate_idx on public.gate_visits (upper(vehicle_plate), gate_in_at desc);
+create unique index if not exists gate_visits_dock_busy_idx on public.gate_visits (dock_id) where status = 'at_dock';
+drop trigger if exists gate_visits_touch on public.gate_visits;
+create trigger gate_visits_touch before update on public.gate_visits for each row execute function public.touch_updated_at();
+
+create table if not exists public.gate_events (
+  id          bigint generated always as identity primary key,
+  visit_id    uuid not null references public.gate_visits (id) on delete cascade,
+  event       text not null check (event in ('gate_in', 'rejected', 'dock_in', 'dock_out', 'gate_out', 'note', 'cancel')),
+  dock_id     uuid references public.docks (id),
+  note        text,
+  user_id     uuid references public.profiles (id) default auth.uid(),
+  device      text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists gate_events_visit_idx on public.gate_events (visit_id, created_at);
+
+alter table public.gate_visits enable row level security;
+alter table public.gate_events enable row level security;
+drop policy if exists gate_visits_read on public.gate_visits;
+create policy gate_visits_read on public.gate_visits for select to authenticated using (public.my_role() is not null);
+drop policy if exists gate_events_read on public.gate_events;
+create policy gate_events_read on public.gate_events for select to authenticated using (public.my_role() is not null);
+grant select on public.gate_visits, public.gate_events to authenticated;
+revoke all on public.gate_visits, public.gate_events from anon;
+
+create or replace function public.my_job() returns text language sql stable security definer set search_path = public as $$
+  select job from profiles where id = auth.uid() and active
+$$;
+
+-- Gate in (security). p: { site_id, purpose, storer, refs:[…], vehicle_plate, vehicle_type, transporter, driver_name, driver_mobile,
+--   eid_number, eid_expiry, licence_number, licence_expiry, mulkiya_number, mulkiya_expiry, ppe_ok, seal_in, notes }
+-- Expired documents or no PPE: the visit is recorded as rejected and the vehicle doesn't enter.
+create or replace function public.gate_in(p jsonb, p_device text default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare v public.gate_visits; v_code text; v_problems text[] := '{}'; v_today date := (now() at time zone 'Asia/Dubai')::date; v_refs text[];
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  if not exists (select 1 from sites where id = (p ->> 'site_id')::uuid and active) then raise exception 'Choose the site'; end if;
+  if coalesce(p ->> 'purpose', '') not in ('inbound', 'outbound', 'other') then raise exception 'Choose inbound, outbound or other'; end if;
+  if nullif(trim(coalesce(p ->> 'vehicle_plate', '')), '') is null then raise exception 'Enter the vehicle plate'; end if;
+  if nullif(trim(coalesce(p ->> 'driver_name', '')), '') is null then raise exception 'Enter the driver''s name'; end if;
+  v_refs := coalesce(array(select upper(trim(x)) from jsonb_array_elements_text(coalesce(p -> 'refs', '[]'::jsonb)) x where trim(x) <> ''), '{}');
+  if p ->> 'purpose' = 'inbound' and cardinality(v_refs) = 0 then raise exception 'Enter at least one ASN or PO number'; end if;
+  if p ->> 'purpose' = 'outbound' and cardinality(v_refs) = 0 then raise exception 'Enter at least one order number'; end if;
+  if exists (select 1 from gate_visits where upper(vehicle_plate) = upper(trim(p ->> 'vehicle_plate')) and status in ('in_yard', 'at_dock', 'dock_done')) then
+    raise exception 'Vehicle % is already inside. Gate it out first.', upper(trim(p ->> 'vehicle_plate'));
+  end if;
+  if (p ->> 'eid_expiry') is null then v_problems := v_problems || 'Emirates ID expiry missing'::text;
+  elsif (p ->> 'eid_expiry')::date < v_today then v_problems := v_problems || ('Emirates ID expired on ' || (p ->> 'eid_expiry')); end if;
+  if (p ->> 'licence_expiry') is null then v_problems := v_problems || 'Driving licence expiry missing'::text;
+  elsif (p ->> 'licence_expiry')::date < v_today then v_problems := v_problems || ('Driving licence expired on ' || (p ->> 'licence_expiry')); end if;
+  if (p ->> 'mulkiya_expiry') is null then v_problems := v_problems || 'Mulkiya expiry missing'::text;
+  elsif (p ->> 'mulkiya_expiry')::date < v_today then v_problems := v_problems || ('Mulkiya expired on ' || (p ->> 'mulkiya_expiry')); end if;
+  if not coalesce((p ->> 'ppe_ok')::boolean, false) then v_problems := v_problems || 'Driver without PPE'::text; end if;
+  loop
+    v_code := upper(substr(translate(md5(random()::text || clock_timestamp()::text), '01', ''), 1, 8));
+    exit when length(v_code) = 8 and not exists (select 1 from gate_visits where pass_code = v_code);
+  end loop;
+  insert into gate_visits (pass_code, site_id, purpose, storer, refs, vehicle_plate, vehicle_type, transporter, driver_name, driver_mobile,
+                           eid_number, eid_expiry, licence_number, licence_expiry, mulkiya_number, mulkiya_expiry, ppe_ok, seal_in, notes,
+                           status, reject_reason)
+  values (v_code, (p ->> 'site_id')::uuid, p ->> 'purpose', trim(coalesce(p ->> 'storer', '')), v_refs, upper(trim(p ->> 'vehicle_plate')),
+          trim(coalesce(p ->> 'vehicle_type', '')), trim(coalesce(p ->> 'transporter', '')), trim(p ->> 'driver_name'), regexp_replace(coalesce(p ->> 'driver_mobile', ''), '[^0-9+]', '', 'g'),
+          trim(coalesce(p ->> 'eid_number', '')), (p ->> 'eid_expiry')::date, trim(coalesce(p ->> 'licence_number', '')), (p ->> 'licence_expiry')::date,
+          trim(coalesce(p ->> 'mulkiya_number', '')), (p ->> 'mulkiya_expiry')::date, coalesce((p ->> 'ppe_ok')::boolean, false),
+          nullif(trim(coalesce(p ->> 'seal_in', '')), ''), nullif(trim(coalesce(p ->> 'notes', '')), ''),
+          case when cardinality(v_problems) > 0 then 'rejected' else 'in_yard' end, nullif(array_to_string(v_problems, '; '), ''))
+  returning * into v;
+  insert into gate_events (visit_id, event, note, device) values (v.id, case when v.status = 'rejected' then 'rejected' else 'gate_in' end, v.reject_reason, p_device);
+  return to_jsonb(v);
+end $$;
+
+-- Dock in / dock out / gate out, by pass code (scanned from the driver's phone or the printed pass).
+create or replace function public.gate_step(p_code text, p_step text, p_dock uuid default null, p_seal text default null, p_device text default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare v public.gate_visits; d public.docks; v_busy text;
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  select * into v from gate_visits where pass_code = upper(trim(p_code)) for update;
+  if not found then raise exception 'Gate pass % not found', upper(trim(p_code)); end if;
+  if v.status = 'rejected' then raise exception 'This vehicle was refused at the gate: %', v.reject_reason; end if;
+  if v.status = 'out' then raise exception 'Vehicle % already left on %', v.vehicle_plate, to_char(v.gate_out_at at time zone 'Asia/Dubai', 'DD Mon HH24:MI'); end if;
+  if p_step = 'dock_in' then
+    if public.my_job() = 'security' and not public.is_staff() then raise exception 'Dock in is done by the warehouse team'; end if;
+    if v.status <> 'in_yard' then raise exception 'Vehicle % is not waiting in the yard', v.vehicle_plate; end if;
+    if v.purpose = 'other' then raise exception 'This visit doesn''t use a dock'; end if;
+    select * into d from docks where id = p_dock and active;
+    if not found then raise exception 'Choose a dock'; end if;
+    if d.site_id <> v.site_id then raise exception '% is not at this vehicle''s site', d.name; end if;
+    select g.vehicle_plate into v_busy from gate_visits g where g.dock_id = d.id and g.status = 'at_dock';
+    if v_busy is not null then raise exception '% is in use by %', d.name, v_busy; end if;
+    update gate_visits set status = 'at_dock', dock_id = d.id, dock_in_at = now(), dock_in_by = auth.uid() where id = v.id returning * into v;
+    insert into gate_events (visit_id, event, dock_id, device) values (v.id, 'dock_in', d.id, p_device);
+  elsif p_step = 'dock_out' then
+    if public.my_job() = 'security' and not public.is_staff() then raise exception 'Dock out is done by the warehouse team'; end if;
+    if v.status <> 'at_dock' then raise exception 'Vehicle % is not at a dock', v.vehicle_plate; end if;
+    if v.purpose = 'outbound' and nullif(trim(coalesce(p_seal, '')), '') is null then raise exception 'Enter the seal number applied to the vehicle'; end if;
+    update gate_visits set status = 'dock_done', dock_out_at = now(), dock_out_by = auth.uid(), seal_out = nullif(trim(coalesce(p_seal, '')), '') where id = v.id returning * into v;
+    insert into gate_events (visit_id, event, dock_id, note, device) values (v.id, 'dock_out', v.dock_id, case when v.seal_out is not null then 'Seal ' || v.seal_out end, p_device);
+  elsif p_step = 'gate_out' then
+    if v.purpose <> 'other' and v.status <> 'dock_done' then
+      raise exception 'Vehicle % can''t leave yet: %', v.vehicle_plate, case v.status when 'in_yard' then 'it hasn''t been to a dock' else 'it hasn''t been docked out' end;
+    end if;
+    update gate_visits set status = 'out', gate_out_at = now(), gate_out_by = auth.uid() where id = v.id returning * into v;
+    insert into gate_events (visit_id, event, device) values (v.id, 'gate_out', p_device);
+  else raise exception 'Unknown step %', p_step;
+  end if;
+  return to_jsonb(v);
+end $$;
+
+-- Supervisor: cancel a visit entered by mistake (with a reason). It is kept for the record.
+create or replace function public.gate_cancel(p_visit uuid, p_note text)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_staff() then raise exception 'Only supervisors can do this' using errcode = '42501'; end if;
+  if nullif(trim(coalesce(p_note, '')), '') is null then raise exception 'Enter a reason'; end if;
+  update gate_visits set status = 'out', gate_out_at = coalesce(gate_out_at, now()), gate_out_by = coalesce(gate_out_by, auth.uid()), notes = concat_ws(' | ', notes, 'Cancelled: ' || trim(p_note))
+   where id = p_visit and status in ('in_yard', 'at_dock', 'dock_done');
+  if not found then raise exception 'This visit is already closed'; end if;
+  insert into gate_events (visit_id, event, note) values (p_visit, 'cancel', trim(p_note));
+end $$;
+
+drop view if exists public.gate_visit_list;
+create view public.gate_visit_list with (security_invoker = true) as
+select v.*, s.name as site_name, d.name as dock_name,
+       gi.full_name as gate_in_name, di.full_name as dock_in_name, do_.full_name as dock_out_name, go.full_name as gate_out_name,
+       round(extract(epoch from (coalesce(v.dock_in_at, v.gate_out_at, now()) - v.gate_in_at)) / 60) as wait_minutes,
+       round(extract(epoch from (coalesce(v.dock_out_at, now()) - v.dock_in_at)) / 60)              as dock_minutes,
+       round(extract(epoch from (coalesce(v.gate_out_at, now()) - v.gate_in_at)) / 60)              as total_minutes
+from public.gate_visits v
+join public.sites s on s.id = v.site_id
+left join public.docks d on d.id = v.dock_id
+left join public.profiles gi on gi.id = v.gate_in_by
+left join public.profiles di on di.id = v.dock_in_by
+left join public.profiles do_ on do_.id = v.dock_out_by
+left join public.profiles go on go.id = v.gate_out_by;
+grant select on public.gate_visit_list to authenticated;
+
+revoke all on function public.gate_in(jsonb, text), public.gate_step(text, text, uuid, text, text), public.gate_cancel(uuid, text), public.my_job() from public, anon;
+grant execute on function public.gate_in(jsonb, text), public.gate_step(text, text, uuid, text, text), public.gate_cancel(uuid, text), public.my_job() to authenticated;

@@ -68,6 +68,102 @@ const uname = id => (S.users.find(u => u.id === id) || {}).full_name || null;
 
 /* ---------- Order QC (demo) ---------- */
 if (!S.qcOrders) seedQc(S);
+/* ---------- Gate pass (demo) ---------- */
+if (!S.gateVisits) seedGate(S);
+function seedGate(S) {
+  if (!S.users.some(u => u.id === "u-sec")) S.users.push({id: "u-sec", full_name: "Rashid Khan", email: "rashid@demo.local", role: "counter", job: "security", site: "DXB Warehouse", active: true});
+  S.users.forEach(u => { if (!u.job) u.job = "operator"; });
+  S.org = [{id: 1, company_name: "RSA Global", pass_base_url: "", yard_alert_minutes: 120, updated_at: "2026-10-01T06:00:00Z"}];
+  S.sites = [{id: "site-dxb", name: "DXB Warehouse", code: "DXB", active: true, created_at: "2026-10-01T06:00:00Z"}, {id: "site-auh", name: "AUH Warehouse", code: "AUH", active: true, created_at: "2026-10-01T06:00:00Z"}];
+  S.docks = [];
+  for (let i = 1; i <= 40; i++) S.docks.push({id: "dk-dxb-" + i, site_id: "site-dxb", name: "Dock " + String(i).padStart(2, "0"), kind: i <= 20 ? "inbound" : "outbound", active: true, sort: i});
+  for (let i = 1; i <= 30; i++) S.docks.push({id: "dk-auh-" + i, site_id: "site-auh", name: "Dock " + String(i).padStart(2, "0"), kind: "both", active: true, sort: i});
+  const ago = m => new Date(Date.now() - m * 60000).toISOString(), soon = d => new Date(Date.now() + d * 864e5).toISOString().slice(0, 10);
+  const base = {site_id: "site-dxb", storer: "", refs: [], vehicle_type: "Truck", transporter: "", driver_mobile: "", eid_number: "784-1985-1234567-1", eid_expiry: soon(400), licence_number: "2345678", licence_expiry: soon(300),
+    mulkiya_number: "TF 10293847", mulkiya_expiry: soon(200), ppe_ok: true, status: "in_yard", reject_reason: null, notes: null, gate_in_by: "u-sec", dock_id: null, dock_in_at: null, dock_in_by: null, dock_out_at: null, dock_out_by: null,
+    seal_in: null, seal_out: null, gate_out_at: null, gate_out_by: null};
+  S.gateVisits = [
+    {...base, id: "gv-1", pass_code: "K7Q2M9TX", purpose: "inbound", storer: "TGD", refs: ["ASN-55120"], vehicle_plate: "DXB K 48213", transporter: "Al Futtaim Logistics", driver_name: "Imran Shah", driver_mobile: "971501234567", seal_in: "SL-778812", gate_in_at: ago(150)},
+    {...base, id: "gv-2", pass_code: "B4N8W2PZ", purpose: "outbound", storer: "DEMO", refs: ["SO-2609290"], vehicle_plate: "SHJ 3 55102", transporter: "Fast Move", driver_name: "Rahul Nair", driver_mobile: "971552223344", gate_in_at: ago(35)},
+    {...base, id: "gv-3", pass_code: "H3R6C8VD", purpose: "inbound", storer: "TGD", refs: ["PO-77120", "PO-77121"], vehicle_plate: "DXB P 90311", vehicle_type: "Container 40ft", transporter: "Gulf Hauliers", driver_name: "Muhammad Asif", status: "at_dock", dock_id: "dk-dxb-3", dock_in_at: ago(50), dock_in_by: "u-ali", gate_in_at: ago(80), seal_in: "SL-990021"},
+    {...base, id: "gv-4", pass_code: "M2X9K4QW", purpose: "outbound", storer: "DEMO", refs: ["SO-2609299"], vehicle_plate: "AJM B 12045", vehicle_type: "Van", transporter: "City Couriers", driver_name: "Sanjay Kumar", status: "dock_done", dock_id: "dk-dxb-22", dock_in_at: ago(70), dock_in_by: "u-ali", dock_out_at: ago(10), dock_out_by: "u-ali", seal_out: "OUT-445120", gate_in_at: ago(95)},
+    {...base, id: "gv-5", pass_code: "T8P3Z6NB", purpose: "other", storer: "", refs: [], vehicle_plate: "DXB A 7741", vehicle_type: "Car", driver_name: "Ahmed Saleh", notes: "Maintenance contractor", status: "out", gate_in_at: ago(240), gate_out_at: ago(180), gate_out_by: "u-sec"},
+    {...base, id: "gv-6", pass_code: "R5V7J2CQ", purpose: "inbound", storer: "TGD", refs: ["ASN-55131"], vehicle_plate: "RAK C 33190", driver_name: "Ali Raza", licence_expiry: soon(-12), status: "rejected", reject_reason: "Driving licence expired on " + soon(-12), gate_in_at: ago(60)}
+  ].map(v => ({...v, updated_at: v.gate_out_at || v.dock_out_at || v.dock_in_at || v.gate_in_at}));
+  S.gateEvents = [];
+  let n = 0;
+  S.gateVisits.forEach(v => {
+    S.gateEvents.push({id: "ge" + (++n), visit_id: v.id, event: v.status === "rejected" ? "rejected" : "gate_in", note: v.reject_reason, user_id: "u-sec", created_at: v.gate_in_at});
+    if (v.dock_in_at) S.gateEvents.push({id: "ge" + (++n), visit_id: v.id, event: "dock_in", dock_id: v.dock_id, user_id: v.dock_in_by, created_at: v.dock_in_at});
+    if (v.dock_out_at) S.gateEvents.push({id: "ge" + (++n), visit_id: v.id, event: "dock_out", dock_id: v.dock_id, note: v.seal_out ? "Seal " + v.seal_out : null, user_id: v.dock_out_by, created_at: v.dock_out_at});
+    if (v.gate_out_at) S.gateEvents.push({id: "ge" + (++n), visit_id: v.id, event: "gate_out", user_id: v.gate_out_by, created_at: v.gate_out_at});
+  });
+}
+const gateList = () => S.gateVisits.map(v => { const s = S.sites.find(x => x.id === v.site_id) || {}, d = S.docks.find(x => x.id === v.dock_id) || {}, mins = (a, b) => a ? Math.round(((b ? Date.parse(b) : Date.now()) - Date.parse(a)) / 60000) : null;
+  return {...v, site_name: s.name, dock_name: d.name || null, gate_in_name: uname(v.gate_in_by), dock_in_name: uname(v.dock_in_by), dock_out_name: uname(v.dock_out_by), gate_out_name: uname(v.gate_out_by),
+    wait_minutes: mins(v.gate_in_at, v.dock_in_at || v.gate_out_at), dock_minutes: mins(v.dock_in_at, v.dock_out_at), total_minutes: mins(v.gate_in_at, v.gate_out_at)}; });
+function gateRpc(name, a, me, staff) {
+  if (!me || !me.active) return E("Your user is not active");
+  const gev = (v, event, x = {}) => S.gateEvents.push({id: "ge" + Date.now() + Math.random().toString(36).slice(2, 6), visit_id: v.id, event, user_id: me.id, created_at: tick(), ...x});
+  const today = new Date(Date.now() + 4 * 3600e3).toISOString().slice(0, 10);
+  if (name === "gate_in") {
+    const p = a.p || {};
+    if (!S.sites.some(s => s.id === p.site_id && s.active)) return E("Choose the site");
+    if (!["inbound", "outbound", "other"].includes(p.purpose)) return E("Choose inbound, outbound or other");
+    const plate = String(p.vehicle_plate || "").trim().toUpperCase(); if (!plate) return E("Enter the vehicle plate");
+    if (!String(p.driver_name || "").trim()) return E("Enter the driver's name");
+    const refs = (p.refs || []).map(x => String(x).trim().toUpperCase()).filter(Boolean);
+    if (p.purpose === "inbound" && !refs.length) return E("Enter at least one ASN or PO number");
+    if (p.purpose === "outbound" && !refs.length) return E("Enter at least one order number");
+    if (S.gateVisits.some(v => v.vehicle_plate.toUpperCase() === plate && ["in_yard", "at_dock", "dock_done"].includes(v.status))) return E(`Vehicle ${plate} is already inside. Gate it out first.`);
+    const prob = [];
+    [["eid_expiry", "Emirates ID"], ["licence_expiry", "Driving licence"], ["mulkiya_expiry", "Mulkiya"]].forEach(([k, l]) => { if (!p[k]) prob.push(l + " expiry missing"); else if (p[k] < today) prob.push(`${l} expired on ${p[k]}`); });
+    if (!p.ppe_ok) prob.push("Driver without PPE");
+    let code; do { code = Math.random().toString(16).slice(2).replace(/[01]/g, "").slice(0, 8).toUpperCase(); } while (code.length < 8 || S.gateVisits.some(v => v.pass_code === code));
+    const v = {id: "gv-" + Math.random().toString(36).slice(2, 9), pass_code: code, site_id: p.site_id, purpose: p.purpose, storer: String(p.storer || "").trim(), refs, vehicle_plate: plate, vehicle_type: p.vehicle_type || "", transporter: String(p.transporter || "").trim(),
+      driver_name: String(p.driver_name).trim(), driver_mobile: String(p.driver_mobile || "").replace(/[^0-9+]/g, ""), eid_number: p.eid_number || "", eid_expiry: p.eid_expiry || null, licence_number: p.licence_number || "", licence_expiry: p.licence_expiry || null,
+      mulkiya_number: p.mulkiya_number || "", mulkiya_expiry: p.mulkiya_expiry || null, ppe_ok: !!p.ppe_ok, status: prob.length ? "rejected" : "in_yard", reject_reason: prob.join("; ") || null, notes: p.notes || null, seal_in: p.seal_in || null, seal_out: null,
+      gate_in_at: tick(), gate_in_by: me.id, dock_id: null, dock_in_at: null, dock_in_by: null, dock_out_at: null, dock_out_by: null, gate_out_at: null, gate_out_by: null, updated_at: tick()};
+    S.gateVisits.push(v); gev(v, prob.length ? "rejected" : "gate_in", {note: v.reject_reason, device: a.p_device});
+    return {data: {...v}, error: null};
+  }
+  if (name === "gate_step") {
+    const v = S.gateVisits.find(x => x.pass_code === String(a.p_code || "").trim().toUpperCase());
+    if (!v) return E(`Gate pass ${String(a.p_code || "").trim().toUpperCase()} not found`);
+    if (v.status === "rejected") return E("This vehicle was refused at the gate: " + v.reject_reason);
+    if (v.status === "out") return E(`Vehicle ${v.vehicle_plate} already left`);
+    const sec = me.job === "security" && !staff;
+    if (a.p_step === "dock_in") {
+      if (sec) return E("Dock in is done by the warehouse team");
+      if (v.status !== "in_yard") return E(`Vehicle ${v.vehicle_plate} is not waiting in the yard`);
+      if (v.purpose === "other") return E("This visit doesn't use a dock");
+      const d = S.docks.find(x => x.id === a.p_dock && x.active); if (!d) return E("Choose a dock");
+      if (d.site_id !== v.site_id) return E(`${d.name} is not at this vehicle's site`);
+      const busy = S.gateVisits.find(x => x.dock_id === d.id && x.status === "at_dock"); if (busy) return E(`${d.name} is in use by ${busy.vehicle_plate}`);
+      Object.assign(v, {status: "at_dock", dock_id: d.id, dock_in_at: tick(), dock_in_by: me.id, updated_at: tick()}); gev(v, "dock_in", {dock_id: d.id, device: a.p_device});
+    } else if (a.p_step === "dock_out") {
+      if (sec) return E("Dock out is done by the warehouse team");
+      if (v.status !== "at_dock") return E(`Vehicle ${v.vehicle_plate} is not at a dock`);
+      const seal = String(a.p_seal || "").trim();
+      if (v.purpose === "outbound" && !seal) return E("Enter the seal number applied to the vehicle");
+      Object.assign(v, {status: "dock_done", dock_out_at: tick(), dock_out_by: me.id, seal_out: seal || null, updated_at: tick()}); gev(v, "dock_out", {dock_id: v.dock_id, note: seal ? "Seal " + seal : null, device: a.p_device});
+    } else if (a.p_step === "gate_out") {
+      if (v.purpose !== "other" && v.status !== "dock_done") return E(`Vehicle ${v.vehicle_plate} can't leave yet: ${v.status === "in_yard" ? "it hasn't been to a dock" : "it hasn't been docked out"}`);
+      Object.assign(v, {status: "out", gate_out_at: tick(), gate_out_by: me.id, updated_at: tick()}); gev(v, "gate_out", {device: a.p_device});
+    } else return E("Unknown step " + a.p_step);
+    return {data: {...v}, error: null};
+  }
+  if (name === "gate_cancel") {
+    if (!staff) return E("Only supervisors can do this");
+    const v = S.gateVisits.find(x => x.id === a.p_visit), note = String(a.p_note || "").trim();
+    if (!note) return E("Enter a reason");
+    if (!v || !["in_yard", "at_dock", "dock_done"].includes(v.status)) return E("This visit is already closed");
+    Object.assign(v, {status: "out", gate_out_at: v.gate_out_at || tick(), gate_out_by: v.gate_out_by || me.id, notes: [v.notes, "Cancelled: " + note].filter(Boolean).join(" | "), updated_at: tick()}); gev(v, "cancel", {note});
+    return {data: null, error: null};
+  }
+  return E("Unknown function " + name);
+}
+
 function seedQc(S) {
   const P = {"PHC-30112": ["6297000331189", "Paracetamol 500 mg, 24 tabs", "PK"], "PHC-30458": ["6297000331523", "Hand sanitiser 500 ml", "BTL"], "PHC-50221": ["6297001102290", "Baby wipes, 80 pcs", "PK"],
     "PHC-70503": ["6297002205031", "Toothpaste 100 ml", "TUBE"], "FMC-10231": ["6291041500213", "Basmati rice 5 kg", "BAG"], "FMC-10877": ["6291003001452", "Sunflower oil 1.8 L", "BTL"],
@@ -211,6 +307,8 @@ const views = {
   reconciliation_list: () => S.reconciliations.map(r => { const s = S.sessions.find(x => x.id === r.session_id); return {...r, session_name: s.name, site: s.site, zone: s.zone, source_file: s.source_file, session_created_at: s.created_at, closed_at: s.closed_at, approved_by_name: uname(r.approved_by)}; }),
   event_list: () => S.events.map(e => { const l = S.lines.find(x => x.id === e.line_id); return {...e, user_name: uname(e.user_id), location: l ? l.location : e.location || null, sku: l ? l.sku : e.code || null}; }),
   qc_orders: () => S.qcOrders, qc_lines: () => S.qcLines, qc_order_list: qcList,
+  org_settings: () => S.org, sites: () => S.sites, docks: () => S.docks, gate_visits: () => S.gateVisits, gate_visit_list: gateList,
+  gate_events: () => S.gateEvents.map(e => ({...e, user_name: uname(e.user_id), dock_name: (S.docks.find(d => d.id === e.dock_id) || {}).name || null})),
   qc_line_v: () => S.qcLines.map(l => { const o = S.qcOrders.find(x => x.id === l.order_id) || {}; return {...l, short_qty: l.expected_qty - l.scanned_qty, order_no: o.order_no, reference: o.reference, storer: o.storer, customer: o.customer, order_status: o.status, order_created_at: o.created_at}; }),
   qc_event_list: () => S.qcEvents.map(e => { const l = S.qcLines.find(x => x.id === e.line_id), o = S.qcOrders.find(x => x.id === e.order_id) || {}; return {...e, user_name: uname(e.user_id), sku: l ? l.sku : null, order_no: o.order_no}; })
 };
@@ -249,11 +347,14 @@ function builder(table, me) {
       const out = st.payload.map(r => {
         if (table === "count_sessions") { const s = {id: "s-" + Math.random().toString(36).slice(2, 8), site: "", zone: "", tolerance_pct: 2, blind: true, recount_other: false, recheck_pct: 5, confirm_location: true, rack_grouping: "last_segment", excess_batch: "optional", excess_mfg: "optional", excess_expiry: "required", status: "draft", source_file: null, created_by: me.id, created_at: tick(), opened_at: null, closed_at: null, closed_by: null, ...r}; S.sessions.push(s); return s; }
         if (table === "count_lines") { const l = {id: ++S.id, barcode: "", batch: "", units_per_case: 1, mfg_date: null, expiry_date: null, description: "", uom: "", unit_cost: 0, counted_qty: null, counted_by: null, counted_at: null, count_round: 0, recount_requested: false, accepted: false, accepted_by: null, accepted_at: null, is_found: false, expected_location: null, remarks: null, updated_at: tick(), ...r}; S.lines.push(l); return l; }
+        if (table === "sites") { const x = {id: "site-" + Math.random().toString(36).slice(2, 8), code: "", active: true, created_at: tick(), ...r}; if (S.sites.some(y => y.name.toUpperCase() === String(x.name).toUpperCase())) return {__err: "A site with this name already exists"}; S.sites.push(x); return x; }
+        if (table === "docks") { const x = {id: "dk-" + Math.random().toString(36).slice(2, 9), kind: "both", active: true, sort: 0, ...r}; if (S.docks.some(y => y.site_id === x.site_id && y.name.toUpperCase() === String(x.name).toUpperCase())) return {__err: `${x.name} already exists at this site`}; S.docks.push(x); return x; }
         return r;
       });
+      const bad = out.find(x => x && x.__err); if (bad) return {data: null, error: {message: bad.__err, code: "23505"}};
       return {data: st.single ? out[0] : st.returning ? out : null, error: null};
     }
-    const src = st.op === "select" ? (views[table] ? views[table]() : []) : (table === "count_sessions" ? S.sessions : table === "count_lines" ? S.lines : table === "profiles" ? S.users : []);
+    const src = st.op === "select" ? (views[table] ? views[table]() : []) : (table === "count_sessions" ? S.sessions : table === "count_lines" ? S.lines : table === "profiles" ? S.users : table === "org_settings" ? S.org : table === "sites" ? S.sites : table === "docks" ? S.docks : []);
     let rows = src.filter(r => st.filters.every(f => f(r)));
     if (st.op === "update") { if (!staff && table !== "profiles") return {data: null, error: {message: "Permission denied", code: "42501"}}; rows.forEach(r => Object.assign(r, st.payload, table === "count_lines" ? {updated_at: tick()} : {})); return {data: null, error: null}; }
     if (st.op === "delete") {
@@ -261,6 +362,8 @@ function builder(table, me) {
       const ids = new Set(rows.map(r => r.id));
       if (table === "count_lines") S.lines = S.lines.filter(r => !ids.has(r.id));
       if (table === "count_sessions") { S.sessions = S.sessions.filter(r => !ids.has(r.id)); S.lines = S.lines.filter(l => !ids.has(l.session_id)); }
+      if (table === "docks") { if (S.gateVisits.some(v => ids.has(v.dock_id))) return {data: null, error: {message: "This dock has been used by vehicles, so it can't be deleted. Turn it off instead.", code: "23503"}}; S.docks = S.docks.filter(r => !ids.has(r.id)); }
+      if (table === "sites") { if (S.gateVisits.some(v => ids.has(v.site_id))) return {data: null, error: {message: "This site has vehicle records, so it can't be deleted. Turn it off instead.", code: "23503"}}; S.sites = S.sites.filter(r => !ids.has(r.id)); S.docks = S.docks.filter(d => !ids.has(d.site_id)); }
       return {data: null, error: null};
     }
     const total = rows.length;
@@ -339,6 +442,7 @@ function rpc(name, a, me) {
       S.reconciliations.push({id: "r" + (S.reconciliations.length + 1), session_id: s.id, ...t, accuracy_pct: t.lines_counted ? Math.round(t.lines_within / t.lines_counted * 10000) / 100 : null, wms_reference: a.p_wms_reference, notes: a.p_notes, approved_by: me.id, approved_at: tick()});
       s.status = "reconciled"; ev(s.id, null, "reconcile", {note: a.p_wms_reference}); return {data: "r", error: null}; }
     default: if (name.startsWith("qc_")) return qcRpc(name, a, me, staff);
+      if (name.startsWith("gate_")) return gateRpc(name, a, me, staff);
   }
   return E("Unknown function " + name);
 }

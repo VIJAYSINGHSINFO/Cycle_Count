@@ -5,10 +5,10 @@ const r = f => fs.readFileSync(path.join(__dirname, "..", f), "utf8");
 const mark = r("brand/mark.svg").replace("<svg ", '<svg class="mark" ');
 const P = {
   theme: r("shared/theme.css"), shell: r("test/shell.css"), mark, demo: r("shared/demo.js"),
-  desktop: {css: r("desktop/desktop.css"), lib: r("desktop/lib/bwip-js-min.js"), js: [r("desktop/labels.js"), r("desktop/qc.js"), r("desktop/app.js")].join("\n;\n")},
-  mobile: {css: r("mobile/www/mobile.css"), js: [r("mobile/www/qc.js"), r("mobile/www/app.js")].join("\n;\n")}
+  desktop: {css: r("desktop/desktop.css"), lib: r("desktop/lib/bwip-js-min.js"), js: [r("desktop/labels.js"), r("desktop/qc.js"), r("desktop/gate.js"), r("desktop/app.js")].join("\n;\n")},
+  mobile: {css: r("mobile/www/mobile.css"), lib: r("desktop/lib/bwip-js-min.js"), js: [r("mobile/www/qc.js"), r("mobile/www/gate.js"), r("mobile/www/app.js")].join("\n;\n")}
 };
-const json = JSON.stringify(P).replace(/<\//g, "<\\/").replace(/<!--/g, "<\\!--");
+const json = JSON.stringify(P).replace(/<\//g, "<\\/").replace(/<!--/g, "<\\u0021--");
 const html = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">

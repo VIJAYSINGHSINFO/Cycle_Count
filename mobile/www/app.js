@@ -31,7 +31,7 @@ const idb = (() => {
 const M = {
   me: ls.get("cc-me"), sess: null, lines: [], byId: new Map(), locs: [], locIdx: new Map(), skuIdx: new Map(),
   cur: -1, confirmed: false, draft: new Map(), scanAdd: false, peers: new Map(),
-  outbox: [], syncing: false, lastSyncErr: null, maxUpdated: null, closed: false, channel: null, timers: [], mode: ls.get("cc-mode") === "qc" ? "qc" : "count"
+  outbox: [], syncing: false, lastSyncErr: null, maxUpdated: null, closed: false, channel: null, timers: [], mode: ["qc", "gate", "dock"].includes(ls.get("cc-mode")) ? ls.get("cc-mode") : "count"
 };
 let tT;
 function toast(msg, bad) { const t = $("#toast"); t.textContent = msg; t.className = "toast show" + (bad ? " bad" : ""); clearTimeout(tT); tT = setTimeout(() => t.className = "toast", bad ? 4500 : 2000); }
@@ -81,11 +81,21 @@ function syncBadge() {
 }
 function topbar(title, left = "", right = "") { return `<header class="top">${left}<span class="t">${esc(title)}</span>${syncBadge()}${right}</header>`; }
 function renderSync() { const s = $("#sync"); if (!s) return; s.outerHTML = syncBadge(); }
+// What this person can do on the phone: security sees only the gate; operators count, check orders and dock vehicles; supervisors see everything.
+function allowedModes() {
+  const staff = M.me && ["admin", "supervisor"].includes(M.me.role);
+  if (M.me && M.me.job === "security" && !staff) return ["gate"];
+  return staff ? ["count", "qc", "dock", "gate"] : ["count", "qc", "dock"];
+}
 function modeTabs(active) {
-  return `<div class="modes" role="tablist" aria-label="What are you doing?">${[["count", "Cycle count"], ["qc", "Order QC"]].map(([k, l]) => `<button role="tab" aria-selected="${active === k}" data-act="mode" data-m="${k}">${l}</button>`).join("")}</div>`;
+  const L = {count: "Count", qc: "Order QC", dock: "Docks", gate: "Gate"}, list = allowedModes();
+  if (list.length < 2) return "";
+  return `<div class="modes" style="grid-template-columns:repeat(${list.length},1fr)" role="tablist" aria-label="What are you doing?">${list.map(k => `<button role="tab" aria-selected="${active === k}" data-act="mode" data-m="${k}">${L[k]}</button>`).join("")}</div>`;
 }
 async function renderSessions() {
   leaveSession();
+  if (!allowedModes().includes(M.mode)) M.mode = allowedModes()[0];
+  if ((M.mode === "gate" || M.mode === "dock") && window.CCGate) return window.CCGate.home(M.mode);
   if (M.mode === "qc" && window.CCQC) return window.CCQC.home();
   $("#root").innerHTML = topbar("Choose a count", "", `<button data-act="signout">Sign out</button>`) + `<div class="wrap">${modeTabs("count")}<p class="small muted">Signed in as ${esc(M.me.full_name)}</p><div class="sess" id="sess"><div class="loading">Loading counts…</div></div></div>`;
   let rows = null;
@@ -638,7 +648,7 @@ setInterval(flush, 5000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { flush(); pull(); } });
 
 /* ---------- camera scanning ---------- */
-function dispatchScan(v) { if (!v) return; if (M.mode === "qc" && window.CCQC) window.CCQC.scan(v); else handleScan(v); }
+function dispatchScan(v) { if (!v) return; if ((M.mode === "gate" || M.mode === "dock") && window.CCGate) window.CCGate.scan(v); else if (M.mode === "qc" && window.CCQC) window.CCQC.scan(v); else handleScan(v); }
 function nativeScanner() { const c = window.Capacitor; return c && c.isNativePlatform && c.isNativePlatform() && c.Plugins && c.Plugins.BarcodeScanner ? c.Plugins.BarcodeScanner : null; }
 const cameraAvailable = () => !!nativeScanner() || "BarcodeDetector" in window;
 async function cameraScan() {
@@ -682,7 +692,7 @@ document.addEventListener("click", async e => {
     case "to-signup": renderLogin("up"); break;
     case "to-signin": renderLogin("in"); break;
     case "reload-sessions": renderSessions(); break;
-    case "mode": M.mode = b.dataset.m === "qc" ? "qc" : "count"; ls.set("cc-mode", M.mode); renderSessions(); break;
+    case "mode": M.mode = ["qc", "gate", "dock"].includes(b.dataset.m) ? b.dataset.m : "count"; ls.set("cc-mode", M.mode); renderSessions(); break;
     case "open": openSession(b.dataset.id).then(showFailed); break;
     case "back": renderSessions(); break;
     case "goto": newVisit(+b.dataset.li, false); renderStage(); announce(); break;
@@ -720,6 +730,7 @@ if (CONFIG.DEMO) {   // hooks for the preview page's test barcodes
   window.__demoScan = v => dispatchScan(v);
   window.__demoState = () => ({phase: M.phase, loc: M.sess && M.locs[M.cur] ? M.locs[M.cur].loc : null, rack: M.sess && M.locs[M.cur] ? M.locs[M.cur].rack : null, session: M.sess ? M.sess.id : null});
 }
+if (window.CCGate) window.CCGate.init({sb, M, esc, fmt, ls, toast, vibrate, isOnline, DEVICE, topbar, modeTabs, leaveSession, cameraAvailable, CAM_ICON});
 if (window.CCQC) window.CCQC.init({sb, M, esc, fmt, uuid, ls, idb, toast, vibrate, isOnline, isServerError, DEVICE, topbar, modeTabs, leaveSession, queue, flushNow, confirmTwice, cameraAvailable, CAM_ICON});
 if ("serviceWorker" in navigator && platform === "web" && !CONFIG.DEMO) navigator.serviceWorker.register("sw.js").catch(() => {});
 boot();

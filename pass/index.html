@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gate pass</title><meta name="robots" content="noindex">
+<style>
+:root{--navy:#13233F;--muted:#5B6A80;--line:#D6DDE7}
+*{box-sizing:border-box}body{margin:0;background:#F5F7FA;color:var(--navy);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;min-height:100vh;display:grid;place-items:center;padding:16px}
+main{width:100%;max-width:380px;background:#fff;border:1px solid var(--line);border-radius:16px;padding:22px 18px;text-align:center}
+.co{font-weight:700;font-size:1rem}.t{margin:2px 0 14px;font-size:1.5rem;font-weight:800}
+canvas{width:260px;height:260px;max-width:100%;image-rendering:pixelated}
+.code{font:700 1.9rem/1 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.12em;margin:10px 0 14px}
+dl{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;text-align:left;margin:0 0 14px}dt{color:var(--muted)}dd{margin:0;font-weight:600}
+p{color:var(--muted);font-size:.9rem;margin:0}.bad{color:#B3321C;font-weight:600}
+</style></head><body><main>
+<div class="co" id="co"></div><div class="t">Gate pass</div>
+<canvas id="qr" aria-label="QR code"></canvas><div class="code" id="code"></div>
+<dl id="dl"></dl>
+<p>Show this screen at the dock and at the gate when you leave. Keep your screen brightness up.</p>
+</main>
+<script src="../console/lib/bwip-js-min.js"></script>
+<script>
+// The pass carries only the pass code and the plate. Personal details stay in the database.
+const q = new URLSearchParams(location.search), code = (q.get("c") || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+document.getElementById("co").textContent = q.get("n") || "";
+document.getElementById("code").textContent = code || "—";
+const add = (k, v) => { if (!v) return; const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = k; dd.textContent = v; document.getElementById("dl").append(dt, dd); };
+add("Vehicle", q.get("p")); add("Site", q.get("s"));
+const t = q.get("t"); if (t && !isNaN(Date.parse(t))) add("Gate in", new Date(t).toLocaleString([], {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"}));
+try { if (!code) throw 0; bwipjs.toCanvas(document.getElementById("qr"), {bcid: "qrcode", text: code, scale: 8, eclevel: "M"}); }
+catch { const c = document.getElementById("qr"); const p = document.createElement("p"); p.className = "bad"; p.textContent = code ? "Show the code below to security." : "This link is incomplete. Ask security to send the pass again."; c.replaceWith(p); }
+</script></body></html>

@@ -6,6 +6,7 @@ const apk = process.env.APK_URL || "";
 fs.rmSync(out, {recursive: true, force: true});
 fs.cpSync("desktop", path.join(out, "console"), {recursive: true});
 fs.cpSync("mobile/www", path.join(out, "mobile"), {recursive: true});
+fs.cpSync("pass", path.join(out, "pass"), {recursive: true});   // gate pass page sent to drivers on WhatsApp
 fs.copyFileSync("brand/mark.svg", path.join(out, "icon.svg"));
 let qr = "";
 if (base) { try { require("qrcode").toString(base + "/mobile/", {type: "svg", margin: 1, color: {dark: "#13233F", light: "#FFFFFF"}}, (e, s) => { if (!e) qr = s; }); } catch { console.log("qrcode package not installed: start page will show the link without a QR code"); } }
