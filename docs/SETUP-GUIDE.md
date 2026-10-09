@@ -153,25 +153,36 @@ The APK from Part 4 is a *debug* build. It's fine for testing and for installing
    - **Start at label position** lets you reuse a partly used label sheet.
    - If a code can't be encoded in the chosen barcode type (for example letters in EAN-13), or the bars would be too thin to scan, the console lists it before printing.
 
+## Version 6: vehicle checklists
+
+**Do this once:** run the new `supabase/schema.sql` in the Supabase SQL Editor (clear, paste the whole file, Run, confirm the warning). Existing data is kept. Four starter checklists are added: inbound before unloading, inbound before dock out, outbound before loading, outbound before dock out.
+
+**How it works**
+- **Phone, Docks tab:** after dock in, open the vehicle. A **Checklists** panel shows what's needed. Tap **Start checklist**, answer each question (Yes / No / N/A, a number, a note or a photo) and submit. Some questions need a photo when the answer is No.
+- A **No on a critical question** fails the checklist: work stops and the console shows a red banner on the yard board.
+- **Console, Gate and yard > visit:** a supervisor sees the answers and photos and chooses **Accept** (work continues, the issue is recorded) or **Reject** (the vehicle is not unloaded/loaded and leaves). A reason is required either way.
+- **Dock out** is blocked until the "before" and "before dock out" checklists are passed or accepted. A rejected vehicle docks out without a seal, marked "Rejected at dock".
+- **Console > Checklists (administrators):** edit the questions: type, critical, N/A allowed, photo when No, number limits, order. Saving creates a new version; past checklists keep the questions they were answered with. **Copy for client** makes a storer-specific version that is used instead of the standard one for that storer. Turn a checklist off to stop using it.
+
 ## Version 5: gate pass, docks and company settings
 
 **Do this once:** run the new `supabase/schema.sql` in the Supabase SQL Editor (clear the editor, paste the whole file, Run, confirm the "destructive operations" warning). All existing data is kept.
 
 **Then, on the console, as an administrator:**
-1. **Settings > Company:** enter the company name. Every screen, gate pass and report reads it from here, so changing it later updates everything. Check the **gate pass page address**: it is filled in with your Stowra web address followed by `/pass/`; keep it unless you host Stowra somewhere else.
+1. **Settings > Company:** optionally enter the company name (leave it empty and screens just say Stowra). Every screen, gate pass and report reads it from here, so changing it later updates everything. Check the **gate pass page address**: it is filled in with your Stowra web address followed by `/pass/`; keep it unless you host Stowra somewhere else.
 2. **Settings > Sites and docks:** add each site, then its docks in one go (for example "Dock " from 1 to 40). Mark docks as inbound only, outbound only or both. Docks can be turned off; docks that have been used can't be deleted (they're part of the history).
 3. **Users:** give security guards the role **Security (mobile: gate only)**. On the phone they see only the Gate screen. Operators get a new **Docks** tab; supervisors see everything.
 
 **How it works**
-- **Gate in (security, Gate tab):** purpose (inbound / outbound / other), storer, ASN/PO or order numbers, vehicle plate and type, transporter, driver name and mobile, Emirates ID, driving licence and Mulkiya (number and expiry), and the PPE question. An expired document or "No PPE" records the visit as **refused**, and the vehicle must not enter. Otherwise Stowra creates a gate pass with a QR code. **Send on WhatsApp** opens WhatsApp on the gate phone with the driver's number and the pass link filled in; security presses send. No WhatsApp account or fee is needed. **Print** is the backup.
-- **Dock in / dock out (warehouse, Docks tab):** scan the driver's QR (or type the plate), choose a free dock, and later dock out. Outbound vehicles need the seal number applied before they can dock out. One vehicle per dock at a time.
+- **Gate in (security, Gate tab):** purpose (inbound / outbound / other), storer, ASN/PO numbers (inbound; outbound order numbers are optional here), vehicle plate and type, transporter, driver name and mobile, Emirates ID, driving licence and Mulkiya (number and expiry), and the PPE question. An expired document or "No PPE" records the visit as **refused**, and the vehicle must not enter. Otherwise Stowra creates a gate pass with a QR code. **Send on WhatsApp** opens WhatsApp on the gate phone with the driver's number and the pass link filled in; security presses send. No WhatsApp account or fee is needed. **Print** is the backup.
+- **Dock in / dock out (warehouse, Docks tab):** scan the driver's QR (or type the plate), for outbound scan or type the order numbers being loaded (at least one), choose a free dock, and later dock out. Outbound vehicles need the seal number applied before they can dock out. One vehicle per dock at a time.
 - **Gate out (security):** scan the QR. Green **Cleared to leave** only after dock out (and shows the seal number to check); otherwise red with the reason.
 - **Console > Gate and yard:** live dock map, vehicles inside with waiting, dock and total time, vehicles over the time limit highlighted (set in Settings, default 2 hours), each visit's full timeline, printable gate pass, and Excel export of the last 31 days.
 - The gate and dock screens need the network (the database checks dock availability and the order of steps).
 
 **Personal data:** Emirates ID, licence and Mulkiya numbers are stored in your database. Only signed-in users can see visits. Agree with your legal/IT team how long these records are kept under UAE data protection law. The driver's gate pass page shows only the pass code, plate, site and time.
 
-**Coming next:** reading Emirates ID, licence and Mulkiya with the phone camera (today they are typed), and the inbound/outbound vehicle checklists between dock in and loading/unloading.
+**Coming next:** reading Emirates ID, licence and Mulkiya with the phone camera (today they are typed).
 
 ## Version 4 changes (recount, damaged stock, blind fix)
 

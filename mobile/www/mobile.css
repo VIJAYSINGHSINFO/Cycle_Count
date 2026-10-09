@@ -165,3 +165,23 @@ input[type=number]{-moz-appearance:textfield;appearance:textfield}
 .xs.ok{background:var(--ok-bg);color:var(--ok)}
 .grid2>*{min-width:0} .grid2 input,.grid2 select{width:100%;min-width:0;box-sizing:border-box}
 .refadd input{min-width:0}
+
+/* ---------- vehicle checklists ---------- */
+.cklist{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.ckrow{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-left:5px solid var(--line);border-radius:8px}
+.ckrow.pass,.ckrow.accepted{border-left-color:var(--ok)} .ckrow.fail,.ckrow.rejected{border-left-color:var(--bad)} .ckrow.todo{border-left-color:var(--warn)}
+.ckres{flex:none;font-weight:700;font-size:.85rem}
+.ckrow.pass .ckres,.ckrow.accepted .ckres{color:var(--ok)} .ckrow.fail .ckres,.ckrow.rejected .ckres{color:var(--bad)} .ckrow.todo .ckres{color:var(--warn)}
+.small.bad,.bad.small{color:var(--bad)} .warnc{color:var(--warn)}
+.ckform{list-style:none;margin:0;padding:0;display:grid;gap:8px;counter-reset:ck}
+.ckq{background:var(--surface);border:1px solid var(--line);border-left:5px solid var(--line);border-radius:10px;padding:12px;counter-increment:ck}
+.ckq.bad{border-left-color:var(--bad);background:var(--bad-bg)} .ckq.warn{border-left-color:var(--warn);background:var(--warn-bg)}
+.ckt{font-weight:600;margin-bottom:8px;line-height:1.35}
+.ckt::before{content:counter(ck) ". ";color:var(--muted)}
+.ckseg{grid-template-columns:1fr 1fr;margin:0}
+.ckseg.three{grid-template-columns:1fr 1fr 1fr}
+.ckseg button{padding:12px 4px}
+.ckseg button.yes[aria-pressed="true"]{background:var(--ok)} .ckseg button.no[aria-pressed="true"]{background:var(--bad)} .ckseg button.na[aria-pressed="true"]{background:var(--muted)}
+.cknum{display:flex;gap:8px;align-items:center}
+.cknum input{flex:1;min-width:0;font:700 1.4rem/1 var(--cond);padding:10px;border:2px solid var(--line);border-radius:8px;text-align:center;background:var(--surface)}
+.cktext{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;box-sizing:border-box}

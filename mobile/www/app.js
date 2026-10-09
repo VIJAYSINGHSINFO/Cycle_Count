@@ -171,7 +171,7 @@ async function openSession(id) {
   joinPresence();
   M.timers.push(setInterval(pull, 15000), setInterval(checkOpen, 60000));
 }
-function leaveSession() { M.timers.forEach(clearInterval); M.timers = []; if (M.channel) { try { sb.removeChannel(M.channel); } catch {} M.channel = null; } }
+function leaveSession() { M.timers.forEach(clearInterval); M.timers = []; try { window.CCGate && window.CCGate.stop(); window.CCQC && window.CCQC.stop(); } catch {} if (M.channel) { try { sb.removeChannel(M.channel); } catch {} M.channel = null; } }
 async function pull() {
   if (!isOnline() || !M.sess) return;
   try { await fetchPages(M.maxUpdated, rows => applyRows(rows)); saveCache(); refreshWalk(); } catch {}
@@ -730,7 +730,7 @@ if (CONFIG.DEMO) {   // hooks for the preview page's test barcodes
   window.__demoScan = v => dispatchScan(v);
   window.__demoState = () => ({phase: M.phase, loc: M.sess && M.locs[M.cur] ? M.locs[M.cur].loc : null, rack: M.sess && M.locs[M.cur] ? M.locs[M.cur].rack : null, session: M.sess ? M.sess.id : null});
 }
-if (window.CCGate) window.CCGate.init({sb, M, esc, fmt, ls, toast, vibrate, isOnline, DEVICE, topbar, modeTabs, leaveSession, cameraAvailable, CAM_ICON});
+if (window.CCGate) window.CCGate.init({sb, M, esc, fmt, uuid, ls, toast, vibrate, isOnline, DEVICE, topbar, modeTabs, leaveSession, cameraAvailable, CAM_ICON});
 if (window.CCQC) window.CCQC.init({sb, M, esc, fmt, uuid, ls, idb, toast, vibrate, isOnline, isServerError, DEVICE, topbar, modeTabs, leaveSession, queue, flushNow, confirmTwice, cameraAvailable, CAM_ICON});
 if ("serviceWorker" in navigator && platform === "web" && !CONFIG.DEMO) navigator.serviceWorker.register("sw.js").catch(() => {});
 boot();

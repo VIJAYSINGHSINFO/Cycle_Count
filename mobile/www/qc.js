@@ -125,6 +125,7 @@ function push(en) {
   saveCache();
 }
 async function checkStillMine() {
+  if (X.M.mode !== "qc") { stopTimers(); return; }
   if (!Q.order || !X.isOnline() || Q.lost) return;
   try {
     const r = await X.sb.rpc("qc_mobile_orders", {p_search: Q.order.order_no}); if (r.error) return;
@@ -356,6 +357,6 @@ async function refresh() {   // after discarding rejected scans: take the server
     X.M.outbox.filter(o => o.kind === "qc" && o.order_id === Q.order.id && !o.failed).sort((x, y) => x.seq - y.seq).forEach(o => applyLocal(o.entry)); saveCache(); } } catch {} }
   render();
 }
-window.CCQC = {init, home, scan, render: refresh, onSynced: () => { if (!Q.order || !["scan", "short", "tote", "line"].includes(Q.view)) return; if (failedFor(Q.order.id).length) { checkStillMine(); if (!Q.block) render(); } }};
+window.CCQC = {init, home, scan, stop: stopTimers, render: refresh, onSynced: () => { if (X.M.mode !== "qc" || !Q.order || !["scan", "short", "tote", "line"].includes(Q.view)) return; if (failedFor(Q.order.id).length) { checkStillMine(); if (!Q.block) render(); } }};
 window.__qcDemo = () => X && X.M.mode === "qc" ? {view: Q.toteAsk ? "tote" : Q.view, order: Q.order, lines: Q.lines, orders: Q.orders, tote: Q.tote, blocked: !!Q.block} : null;
 })();

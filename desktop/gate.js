@@ -7,7 +7,18 @@ const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [..
 const PURPOSE = {inbound: "Inbound", outbound: "Outbound", other: "Other visit"};
 const STATUS = {in_yard: "Waiting in yard", at_dock: "At dock", dock_done: "Ready to leave", out: "Left", rejected: "Refused at gate"};
 const PILL = {in_yard: "open", at_dock: "draft", dock_done: "reconciled", out: "closed", rejected: "closed"};
-const EVENT = {gate_in: "Gate in", rejected: "Refused at gate", dock_in: "Dock in", dock_out: "Dock out", gate_out: "Gate out", note: "Note", cancel: "Cancelled"};
+const EVENT = {gate_in: "Gate in", rejected: "Refused at gate", dock_in: "Dock in", dock_out: "Dock out", gate_out: "Gate out", note: "Note", cancel: "Cancelled", checklist: "Checklist"};
+const ckOk = r => r === "pass" || r === "accepted";
+const ckReady = v => v.ck_before === "rejected" || v.ck_after === "rejected" || ((!v.ck_before_needed || ckOk(v.ck_before)) && (!v.ck_after_needed || ckOk(v.ck_after)));
+// Checklist state of a vehicle at a dock, for the yard board
+function ckState(v) {
+  if (v.status !== "at_dock") return null;
+  if (v.ck_before === "rejected" || v.ck_after === "rejected") return ["bad", "Rejected at dock"];
+  if (v.ck_before === "fail" || v.ck_after === "fail") return ["bad", "Checklist failed: decide"];
+  if (v.ck_before_needed && !["pass", "accepted"].includes(v.ck_before)) return ["warn", "Checklist to do"];
+  if (v.ck_after_needed && !["pass", "accepted"].includes(v.ck_after)) return ["", "Dock-out checklist to do"];
+  return null;
+}
 const V = {site: null, view: "active"};
 const mins = m => m == null ? "–" : m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
 const d8 = s => s ? new Date(s + "T00:00:00").toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"}) : "–";
@@ -37,13 +48,13 @@ async function pageBoard(main) {
       C.q(C.sb.from("gate_visit_list").select("*").eq("site_id", V.site).gte("gate_in_at", since.toISOString()).order("gate_in_at", {ascending: false}).limit(1000))]);
   } catch (e) { C.fail(e); return; }
   const alertMin = B.org.yard_alert_minutes || 120, docks = B.docks.filter(d => d.site_id === V.site && d.active);
-  const over = rows.filter(v => v.total_minutes > alertMin);
+  const over = rows.filter(v => v.total_minutes > alertMin), decide = rows.filter(v => v.status === "at_dock" && (v.ck_before === "fail" || v.ck_after === "fail"));
   const byDock = new Map(rows.filter(v => v.status === "at_dock").map(v => [v.dock_id, v]));
   const row = v => `<tr style="cursor:pointer" data-ga="open" data-id="${C.esc(v.id)}" class="${v.total_minutes > alertMin && !["out", "rejected"].includes(v.status) ? "over" : ""}">
     <td><strong>${C.esc(v.vehicle_plate)}</strong><br><span class="small muted">${C.esc(v.vehicle_type || "")}</span></td>
     <td>${PURPOSE[v.purpose]}<br><span class="small muted">${C.esc([v.storer, (v.refs || []).join(", ")].filter(Boolean).join(" · "))}</span></td>
     <td>${C.esc(v.driver_name)}<br><span class="small muted">${C.esc(v.transporter || "")}</span></td>
-    <td><span class="pill ${PILL[v.status]}">${STATUS[v.status]}</span>${v.dock_name ? `<br><span class="small">${C.esc(v.dock_name)}</span>` : ""}${v.status === "rejected" ? `<br><span class="small var-neg" style="white-space:normal">${C.esc(v.reject_reason || "")}</span>` : ""}</td>
+    <td><span class="pill ${PILL[v.status]}">${STATUS[v.status]}</span>${v.dock_name ? `<br><span class="small">${C.esc(v.dock_name)}</span>` : ""}${(c => c ? `<br><span class="status ${c[0] === "bad" ? "s-out" : c[0] === "warn" ? "s-accepted" : "s-uncounted"}">${c[1]}</span>` : "")(ckState(v))}${v.status === "rejected" ? `<br><span class="small var-neg" style="white-space:normal">${C.esc(v.reject_reason || "")}</span>` : ""}</td>
     <td class="small">${C.dt(v.gate_in_at)}</td><td class="n">${v.status === "rejected" ? "–" : mins(v.wait_minutes)}</td><td class="n">${v.dock_in_at ? mins(v.dock_minutes) : "–"}</td>
     <td class="n"><strong class="${v.total_minutes > alertMin && !["out", "rejected"].includes(v.status) ? "var-neg" : ""}">${v.status === "rejected" ? "–" : mins(v.total_minutes)}</strong></td></tr>`;
   const head = `<thead><tr><th>Vehicle</th><th>Purpose</th><th>Driver</th><th>Status</th><th>Gate in</th><th class="n">Waiting</th><th class="n">At dock</th><th class="n">Total</th></tr></thead>`;
@@ -52,6 +63,7 @@ async function pageBoard(main) {
     <div class="pagehead"><div><h1>Gate and yard</h1><p class="muted small" style="margin:4px 0 0">Security gates vehicles in and out on the phone; the warehouse team docks them in and out. Vehicles inside longer than ${mins(alertMin)} are highlighted.</p></div>
       <div class="row"><select class="search" id="gsite" style="min-width:0">${B.sites.map(s => `<option value="${C.esc(s.id)}" ${s.id === V.site ? "selected" : ""}>${C.esc(s.name)}${s.active ? "" : " (off)"}</option>`).join("")}</select>
       <button class="btn" data-ga="export">Export to Excel</button></div></div>
+    ${decide.length ? `<div class="banner bad"><span>Checklist failed, supervisor decision needed: ${decide.map(v => `<a href="#/gate/${C.esc(v.id)}">${C.esc(v.vehicle_plate)}</a>`).join(", ")}.</span></div>` : ""}
     ${over.length ? `<div class="banner bad"><span>${over.length} vehicle${over.length === 1 ? " has" : "s have"} been inside longer than ${mins(alertMin)}: ${over.map(v => C.esc(v.vehicle_plate)).join(", ")}.</span></div>` : ""}
     <div class="stats">
       <div class="stat"><div class="l">Waiting in yard</div><div class="v">${C.fmt(rows.filter(v => v.status === "in_yard").length)}</div></div>
@@ -71,8 +83,9 @@ async function pageBoard(main) {
 
 /* ---------- one visit ---------- */
 async function pageVisit(main, id) {
-  let v, ev, B;
-  try { [v, ev, B] = await Promise.all([C.q(C.sb.from("gate_visit_list").select("*").eq("id", id).single()), C.q(C.sb.from("gate_events").select("*").eq("visit_id", id).order("created_at")), loadBase()]); }
+  let v, ev, B, runs = [];
+  try { [v, ev, B, runs] = await Promise.all([C.q(C.sb.from("gate_visit_list").select("*").eq("id", id).single()), C.q(C.sb.from("gate_events").select("*").eq("visit_id", id).order("created_at")), loadBase(),
+    C.q(C.sb.from("checklist_runs").select("*").eq("visit_id", id).order("submitted_at"))]); }
   catch { main.innerHTML = `<div class="empty"><h2>Visit not found</h2><p><a href="#/gate">Back to the yard</a></p></div>`; return; }
   const busy = new Set((await C.q(C.sb.from("gate_visits").select("dock_id").eq("status", "at_dock")).catch(() => [])).map(x => x.dock_id));
   const free = B.docks.filter(d => d.site_id === v.site_id && d.active && !busy.has(d.id) && (d.kind === "both" || d.kind === v.purpose));
@@ -87,7 +100,8 @@ async function pageVisit(main, id) {
         ${["in_yard", "at_dock", "dock_done"].includes(v.status) ? `<button class="btn danger" data-ga="cancel">Cancel visit</button>` : ""}</div></div>
     ${v.status === "rejected" ? `<div class="banner bad"><span>Refused at the gate: ${C.esc(v.reject_reason || "")}</span></div>` : ""}
     ${v.status === "in_yard" && v.purpose !== "other" ? `<div class="panel" style="margin-bottom:14px"><h3 style="margin-bottom:8px">Dock in</h3><div class="row"><select class="search" id="gdock" style="min-width:200px">${free.length ? free.map(d => `<option value="${C.esc(d.id)}">${C.esc(d.name)}${d.kind !== "both" ? " (" + d.kind + ")" : ""}</option>`).join("") : `<option value="">No free dock</option>`}</select><button class="btn go" data-ga="step" data-s="dock_in" ${free.length ? "" : "disabled"}>Dock in</button></div></div>` : ""}
-    ${v.status === "at_dock" ? `<div class="panel" style="margin-bottom:14px"><h3 style="margin-bottom:8px">Dock out from ${C.esc(v.dock_name || "")}</h3><div class="row"><input class="search" id="gseal" placeholder="Seal number${v.purpose === "outbound" ? " (required)" : " (optional)"}"><button class="btn go" data-ga="step" data-s="dock_out">Dock out</button></div></div>` : ""}
+    ${v.status === "at_dock" && !ckReady(v) ? `<div class="banner warn"><span>${ckState(v) ? ckState(v)[1] : "Checklists to do"}. Dock out becomes available when the checklists are complete.</span></div>` : ""}
+    ${v.status === "at_dock" && ckReady(v) ? `<div class="panel" style="margin-bottom:14px"><h3 style="margin-bottom:8px">Dock out from ${C.esc(v.dock_name || "")}${v.ck_before === "rejected" || v.ck_after === "rejected" ? " (vehicle rejected)" : ""}</h3><div class="row"><input class="search" id="gseal" placeholder="Seal number${v.purpose === "outbound" ? " (required)" : " (optional)"}"><button class="btn go" data-ga="step" data-s="dock_out">Dock out</button></div></div>` : ""}
     <div class="twocol">
       <div class="panel"><h3 style="margin-bottom:8px">Vehicle and driver</h3><table><tbody>
         <tr><th>Vehicle</th><td>${C.esc(v.vehicle_plate)} ${C.esc(v.vehicle_type ? "· " + v.vehicle_type : "")}</td></tr>
@@ -99,11 +113,12 @@ async function pageVisit(main, id) {
         <tr><th>PPE at gate</th><td>${v.ppe_ok ? "Yes" : `<span class="var-neg">No</span>`}</td></tr></tbody></table></div>
       <div class="panel"><h3 style="margin-bottom:8px">Load</h3><table><tbody>
         <tr><th>Purpose</th><td>${PURPOSE[v.purpose]}</td></tr><tr><th>Storer / client</th><td>${C.esc(v.storer || "–")}</td></tr>
-        <tr><th>${v.purpose === "inbound" ? "ASN / PO" : v.purpose === "outbound" ? "Orders" : "References"}</th><td>${(v.refs || []).map(r => `<span class="tag">${C.esc(r)}</span>`).join(" ") || "–"}</td></tr>
+        <tr><th>${v.purpose === "inbound" ? "ASN / PO" : v.purpose === "outbound" ? "Orders" : "References"}</th><td>${(v.refs || []).map(r => `<span class="tag">${C.esc(r)}</span>`).join(" ") || (v.purpose === "outbound" && v.status === "in_yard" ? "Added at dock in" : "–")}</td></tr>
         <tr><th>Seal on arrival</th><td>${C.esc(v.seal_in || "–")}</td></tr><tr><th>Seal on departure</th><td>${C.esc(v.seal_out || "–")}</td></tr>
         <tr><th>Notes</th><td style="white-space:normal">${C.esc(v.notes || "–")}</td></tr>
         <tr><th>Time</th><td>Waiting ${mins(v.wait_minutes)} · at dock ${v.dock_in_at ? mins(v.dock_minutes) : "–"} · total ${mins(v.total_minutes)}</td></tr></tbody></table></div>
     </div>
+    ${ckSection(v, runs)}
     <h3 style="margin:18px 0 0">Timeline</h3>
     <div class="tablewrap"><table><thead><tr><th>When</th><th>Step</th><th>Dock</th><th>By</th><th>Note</th></tr></thead><tbody>
       ${ev.map(e => `<tr><td class="small">${C.dt(e.created_at)}</td><td>${EVENT[e.event] || C.esc(e.event)}</td><td>${C.esc((B.docks.find(d => d.id === e.dock_id) || {}).name || "")}</td><td>${C.esc(e.user_name || users.get(e.user_id) || "–")}</td><td class="small" style="white-space:normal">${C.esc(e.note || "")}</td></tr>`).join("")}
@@ -191,6 +206,37 @@ async function addDocks(siteId, blk) {
   if (await C.run(() => C.q(C.sb.from("docks").insert(rows).select()), `${rows.length} dock${rows.length === 1 ? "" : "s"} added`)) pageSettings($("#main"));
 }
 
+/* ---------- checklists on the visit page ---------- */
+function ckSection(v, runs) {
+  if (!runs.length && !(v.status === "at_dock" && (v.ck_before_needed || v.ck_after_needed))) return "";
+  const word = v.purpose === "inbound" ? "unloading" : "loading";
+  const latest = st => runs.filter(r => r.stage === st).slice(-1)[0];
+  const ans = (it, a) => { a = a || {}; const val = a.value;
+    const txt = it.type === "photo" ? "" : val === "yes" ? "Yes" : val === "no" ? "No" : val === "na" ? "N/A" : val == null || val === "" ? "–" : C.esc(val) + (it.unit ? " " + C.esc(it.unit) : "");
+    const bad = val === "no" || (it.type === "number" && val !== "na" && val != null && val !== "" && ((it.min !== undefined && it.min !== "" && +val < +it.min) || (it.max !== undefined && it.max !== "" && +val > +it.max)));
+    const ph = (a.photos || []).length ? ` <button class="linkbtn small" data-ga="ck-photos" data-p="${C.esc(JSON.stringify(a.photos))}" data-t="${C.esc(it.text)}">Photo${a.photos.length === 1 ? "" : "s"} (${a.photos.length})</button>` : "";
+    return `<span class="${bad ? (it.critical ? "var-neg" : "warnc") : ""}"><strong>${txt}</strong></span>${ph}`; };
+  const block = r => `<div class="panel ckpanel ${r.result}"><div class="row" style="justify-content:space-between"><h3 style="margin:0">${r.stage === "before" ? `Before ${word}` : "Before dock out"} <span class="small muted">${C.esc(r.template_name)}</span></h3>
+      <span class="status ${r.result === "pass" || r.result === "accepted" ? "s-match" : "s-out"}">${{pass: "Passed", fail: "Failed", accepted: "Failed, accepted", rejected: "Failed, vehicle rejected"}[r.result]}</span></div>
+    <p class="small muted" style="margin:4px 0 8px">By ${C.esc(r.submitted_by_name || "–")}, ${C.dt(r.submitted_at)}${r.decided_at ? ` · ${r.result === "accepted" ? "accepted" : "rejected"} by ${C.esc(r.decided_by_name || "–")}, ${C.dt(r.decided_at)}: ${C.esc(r.decision_note || "")}` : ""}</p>
+    ${r.result === "fail" && latest(r.stage) && latest(r.stage).id === r.id && v.status === "at_dock" ? `<div class="banner bad"><span>Critical: ${C.esc((r.failed || []).join("; "))}. Decide whether the vehicle can be ${word === "unloading" ? "unloaded" : "loaded"}.</span>
+      <span class="row"><button class="btn sm" data-ga="ck-decide" data-run="${C.esc(r.id)}" data-d="accept">Accept and continue</button><button class="btn sm danger" data-ga="ck-decide" data-run="${C.esc(r.id)}" data-d="reject">Reject vehicle</button></span></div>` : ""}
+    <table><tbody>${(r.items || []).map(it => `<tr><td style="white-space:normal">${C.esc(it.text)}${it.critical ? ` <span class="xs-crit">critical</span>` : ""}</td><td class="n" style="white-space:normal">${ans(it, (r.answers || {})[it.id])}</td></tr>`).join("")}</tbody></table></div>`;
+  const pend = st => v.status === "at_dock" && v["ck_" + st + "_needed"] && !runs.some(r => r.stage === st) ? `<div class="panel ckpanel todo"><h3 style="margin:0">${st === "before" ? `Before ${word}` : "Before dock out"}</h3><p class="small muted" style="margin:4px 0 0">Not done yet. It's filled in on the phone (Docks tab).</p></div>` : "";
+  return `<h3 style="margin:18px 0 8px">Checklists</h3><div class="ckwrap">${runs.map(block).join("")}${pend("before")}${pend("after")}</div>`;
+}
+function ckDecide(run, d) {
+  let dlg = $("#ckdlg"); if (dlg) dlg.remove();
+  dlg = document.createElement("dialog"); dlg.id = "ckdlg";
+  dlg.innerHTML = `<form method="dialog"><h2 style="margin-bottom:8px">${d === "accept" ? "Accept and continue" : "Reject the vehicle"}</h2>
+    <p class="hint">${d === "accept" ? "The team can start working with this vehicle despite the failed checklist. Your name and reason are recorded." : "The vehicle isn't loaded or unloaded. The team docks it out and security can gate it out. Your name and reason are recorded."}</p>
+    <label class="field" style="margin-bottom:16px">Reason<textarea name="note" rows="3" required style="min-height:70px;font-family:var(--sans)" placeholder="${d === "accept" ? "e.g. seal number typo on the delivery note, confirmed with the transporter" : "e.g. pests found in the trailer, transporter informed"}"></textarea></label>
+    <div class="row"><button class="btn ${d === "accept" ? "primary" : "danger"}" value="ok">${d === "accept" ? "Accept" : "Reject vehicle"}</button><button class="btn ghost" value="cancel" formnovalidate>Back</button></div></form>`;
+  document.body.appendChild(dlg); dlg.showModal();
+  dlg.onclose = async () => { if (dlg.returnValue !== "ok") return; const note = dlg.querySelector("textarea").value.trim(); if (!note) return C.toast("Enter a reason.", true);
+    if (await C.run(() => C.q(C.sb.rpc("checklist_decide", {p_run: run, p_decision: d, p_note: note})), d === "accept" ? "Accepted" : "Vehicle rejected")) pageVisit($("#main"), C.cache.visit.v.id); };
+}
+
 /* ---------- clicks ---------- */
 document.addEventListener("click", async e => {
   const b = e.target.closest("[data-ga]"); if (!b || !C) return;
@@ -202,6 +248,8 @@ document.addEventListener("click", async e => {
     case "step": step(b.dataset.s); break;
     case "cancel": cancel(); break;
     case "print": printPass(); break;
+    case "ck-decide": ckDecide(b.dataset.run, b.dataset.d); break;
+    case "ck-photos": C.showPhotos(JSON.parse(b.dataset.p || "[]"), b.dataset.t || "Photos"); break;
     case "site-toggle": if (await C.run(() => C.q(C.sb.from("sites").update({active: b.dataset.on === "1"}).eq("id", b.dataset.id)), "Site updated")) pageSettings($("#main")); break;
     case "site-del": if (C.confirmTwice(b, "sdel" + b.dataset.id, "Tap again to delete") && await C.run(() => C.q(C.sb.from("sites").delete().eq("id", b.dataset.id)), "Site deleted")) pageSettings($("#main")); break;
     case "docks-add": addDocks(b.dataset.id, b.closest(".siteblk")); break;

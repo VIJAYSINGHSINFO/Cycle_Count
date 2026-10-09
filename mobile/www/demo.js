@@ -70,6 +70,91 @@ const uname = id => (S.users.find(u => u.id === id) || {}).full_name || null;
 if (!S.qcOrders) seedQc(S);
 /* ---------- Gate pass (demo) ---------- */
 if (!S.gateVisits) seedGate(S);
+/* ---------- Checklists (demo) ---------- */
+if (!S.ckTemplates) seedCk(S);
+function seedCk(S) {
+  const t = (id, name, purpose, stage, items) => ({id, name, kind: "vehicle", purpose, stage, storer: "", items, active: true, version: 1, updated_at: "2026-10-01T06:00:00Z", updated_by: "u-admin"});
+  const yn = (id, text, o = {}) => ({id, text, type: "yesno", ...o});
+  S.ckTemplates = [
+    t("ckt-ib", "Inbound: before unloading", "inbound", "before", [yn("i1", "Seal number matches the delivery documents", {critical: true, photo_on_no: true}), yn("i2", "Seal intact, not broken or tampered", {critical: true, photo_on_no: true}),
+      yn("i3", "Delivery documents received (delivery note, packing list)", {critical: true}), yn("i4", "Vehicle body free of holes, leaks and damage", {photo_on_no: true}), yn("i5", "Cargo free of visible damage when doors opened", {photo_on_no: true}),
+      yn("i6", "No pests, bad smell or contamination", {critical: true, photo_on_no: true}), {id: "i7", text: "Reefer temperature", type: "number", unit: "°C", na: true}, yn("i8", "Engine off, keys handed over", {critical: true}),
+      yn("i9", "Wheel chocks in place", {critical: true}), yn("i10", "Dock leveller positioned safely", {critical: true})]),
+    t("ckt-ia", "Inbound: before dock out", "inbound", "after", [yn("i1", "Vehicle fully unloaded", {critical: true}), yn("i2", "Shortages, excess or damages reported to the supervisor", {na: true}), yn("i3", "Dock area clear and safe"), yn("i4", "Wheel chocks removed, dock leveller raised", {critical: true})]),
+    t("ckt-ob", "Outbound: before loading", "outbound", "before", [yn("i1", "Floor, walls and roof clean and dry", {critical: true, photo_on_no: true}), yn("i2", "No holes, leaks or damage", {critical: true, photo_on_no: true}), yn("i3", "No pests or bad smell", {critical: true, photo_on_no: true}),
+      {id: "i4", text: "Reefer pre-cooled: temperature", type: "number", unit: "°C", na: true}, yn("i5", "Tyres and lights in good condition"), yn("i6", "Engine off, keys handed over", {critical: true}), yn("i7", "Wheel chocks in place", {critical: true}), yn("i8", "Dock leveller positioned safely", {critical: true})]),
+    t("ckt-oa", "Outbound: before dock out", "outbound", "after", [yn("i1", "All orders loaded as per the loading list", {critical: true}), yn("i2", "Load secured with straps or bars", {critical: true, photo_on_no: true}),
+      {id: "i3", text: "Photo of the loaded vehicle before closing the doors", type: "photo"}, yn("i4", "Doors closed and seal applied", {critical: true}), yn("i5", "Wheel chocks removed, dock leveller raised", {critical: true})])
+  ];
+  // the two vehicles already past their checklists in the sample yard
+  const ago = m => new Date(Date.now() - m * 60000).toISOString();
+  const pass = (visit, tid, stage, m) => { const tp = S.ckTemplates.find(x => x.id === tid), answers = {}; tp.items.forEach(it => { answers[it.id] = {value: it.type === "number" ? "na" : "yes", photos: []}; });
+    return {id: "ckr-" + visit + stage, template_id: tid, template_name: tp.name, template_version: 1, items: tp.items, visit_id: visit, stage, answers, result: "pass", failed: [], issues: [], photos: [], submitted_by: "u-ali", submitted_at: ago(m), decided_by: null, decided_at: null, decision_note: null}; };
+  S.ckRuns = [pass("gv-3", "ckt-ib", "before", 45), pass("gv-4", "ckt-ob", "before", 65)];
+  const r4 = pass("gv-4", "ckt-oa", "after", 12); r4.items = S.ckTemplates.find(x => x.id === "ckt-oa").items; r4.answers.i3 = {photos: []}; S.ckRuns.push(r4);
+}
+const ckTemplateFor = (purpose, storer, stage) => S.ckTemplates.filter(t => t.active && t.kind === "vehicle" && t.purpose === purpose && t.stage === stage && (t.storer === "" || t.storer.toUpperCase() === String(storer || "").toUpperCase()))
+  .sort((a, b) => (b.storer !== "") - (a.storer !== ""))[0] || null;
+const ckLatest = (visit, stage) => S.ckRuns.filter(r => r.visit_id === visit && r.stage === stage).sort((a, b) => a.submitted_at < b.submitted_at ? 1 : -1)[0] || null;
+const ckWord = p => p === "inbound" ? "unloading" : "loading";
+function ckDockOutCheck(v, seal) {
+  const b = ckLatest(v.id, "before"), af = ckLatest(v.id, "after"), rej = (b && b.result === "rejected") || (af && af.result === "rejected");
+  if (rej) return {rej: true};
+  if (ckTemplateFor(v.purpose, v.storer, "before") && !(b && ["pass", "accepted"].includes(b.result))) return {err: b && b.result === "fail" ? `The before-${ckWord(v.purpose)} checklist failed. A supervisor must accept or reject the vehicle first.` : `Complete the before-${ckWord(v.purpose)} checklist first.`};
+  if (ckTemplateFor(v.purpose, v.storer, "after") && !(af && ["pass", "accepted"].includes(af.result))) return {err: af && af.result === "fail" ? "The dock-out checklist failed. A supervisor must accept or reject it first." : "Complete the dock-out checklist first."};
+  if (v.purpose === "outbound" && !seal) return {err: "Enter the seal number applied to the vehicle"};
+  return {rej: false};
+}
+function ckRpc(name, a, me, staff) {
+  if (!me || !me.active) return E("Your user is not active");
+  const gev = (visit, note, device) => S.gateEvents.push({id: "ge" + Date.now() + Math.random().toString(36).slice(2, 6), visit_id: visit, event: "checklist", note, device: device || null, user_id: me.id, created_at: tick()});
+  if (name === "checklist_status") {
+    const v = S.gateVisits.find(x => x.id === a.p_visit); if (!v || v.purpose === "other") return {data: [], error: null};
+    return {data: ["before", "after"].map(stage => { const t = ckTemplateFor(v.purpose, v.storer, stage), r = ckLatest(v.id, stage); if (!t && !r) return null;
+      return {stage, template: t ? {id: t.id, name: t.name, items: t.items, version: t.version} : null,
+        run: r ? {id: r.id, result: r.result, failed: r.failed, issues: r.issues, submitted_at: r.submitted_at, submitted_by_name: uname(r.submitted_by), decision_note: r.decision_note, decided_by_name: uname(r.decided_by)} : null}; }).filter(Boolean), error: null};
+  }
+  if (name === "checklist_submit") {
+    if (a.p_client_id) { const d = S.ckRuns.find(r => r.client_id === a.p_client_id); if (d) return {data: {...d}, error: null}; }
+    const v = S.gateVisits.find(x => x.id === a.p_visit); if (!v) return E("Visit not found");
+    if (v.status !== "at_dock") return E(`Vehicle ${v.vehicle_plate} is not at a dock`);
+    const t = ckTemplateFor(v.purpose, v.storer, a.p_stage); if (!t) return E("No checklist is set up for this");
+    const prev = ckLatest(v.id, a.p_stage);
+    if (prev && ["pass", "accepted"].includes(prev.result)) return E("This checklist is already done");
+    if (prev && prev.result === "rejected") return E("The vehicle was rejected at the dock");
+    if (a.p_stage === "after" && ckTemplateFor(v.purpose, v.storer, "before")) { const b = ckLatest(v.id, "before"); if (!b || !["pass", "accepted"].includes(b.result)) return E("Complete the first checklist before this one"); }
+    const failed = [], issues = [], missing = [], photos = [], ans = a.p_answers || {};
+    for (const it of t.items) {
+      const x = ans[it.id] || {}, val = x.value == null ? "" : String(x.value).trim(), ph = x.photos || [], req = it.required !== false; photos.push(...ph);
+      if (it.type === "photo") { if (!ph.length && req) missing.push(it.text); continue; }
+      if (!val) { if (req) missing.push(it.text); continue; }
+      if (val === "na") { if (!it.na) missing.push(it.text); continue; }
+      let bad = false;
+      if (it.type === "yesno") { if (!["yes", "no"].includes(val)) { missing.push(it.text); continue; } bad = val === "no"; if (bad && it.photo_on_no && !ph.length) return E("Take a photo for: " + it.text); }
+      else if (it.type === "number") { const n = Number(val); if (!isFinite(n)) return E("Enter a number for: " + it.text); bad = (it.min !== undefined && it.min !== "" && n < +it.min) || (it.max !== undefined && it.max !== "" && n > +it.max); }
+      if (bad) (it.critical ? failed : issues).push(it.text);
+    }
+    if (missing.length) return E("Answer: " + missing.join("; "));
+    const r = {id: "ckr-" + Math.random().toString(36).slice(2, 10), template_id: t.id, template_name: t.name, template_version: t.version, items: JSON.parse(JSON.stringify(t.items)), visit_id: v.id, stage: a.p_stage, answers: ans,
+      result: failed.length ? "fail" : "pass", failed, issues, photos, submitted_by: me.id, submitted_at: tick(), decided_by: null, decided_at: null, decision_note: null, device: a.p_device || null, client_id: a.p_client_id || null};
+    S.ckRuns.push(r); gev(v.id, `${t.name}: ${failed.length ? `FAILED (${failed.join("; ")})` : "passed"}${issues.length ? ` · issues: ${issues.join("; ")}` : ""}`, a.p_device);
+    return {data: {...r}, error: null};
+  }
+  if (name === "checklist_decide") {
+    if (!staff) return E("Only supervisors can do this");
+    if (!["accept", "reject"].includes(a.p_decision)) return E("Choose accept or reject");
+    const note = String(a.p_note || "").trim(); if (!note) return E("Enter a reason");
+    const r = S.ckRuns.find(x => x.id === a.p_run); if (!r) return E("Checklist not found");
+    if (r.result !== "fail") return E("This checklist doesn't need a decision");
+    if (ckLatest(r.visit_id, r.stage).id !== r.id) return E("A newer checklist exists for this vehicle");
+    const v = S.gateVisits.find(x => x.id === r.visit_id); if (!v || v.status !== "at_dock") return E("The vehicle is no longer at the dock");
+    Object.assign(r, {result: a.p_decision === "accept" ? "accepted" : "rejected", decided_by: me.id, decided_at: tick(), decision_note: note});
+    gev(r.visit_id, `${r.template_name}: ${a.p_decision === "accept" ? "accepted by supervisor" : "vehicle REJECTED"} · ${note}`);
+    return {data: null, error: null};
+  }
+  return E("Unknown function " + name);
+}
+
 function seedGate(S) {
   if (!S.users.some(u => u.id === "u-sec")) S.users.push({id: "u-sec", full_name: "Rashid Khan", email: "rashid@demo.local", role: "counter", job: "security", site: "DXB Warehouse", active: true});
   S.users.forEach(u => { if (!u.job) u.job = "operator"; });
@@ -84,7 +169,7 @@ function seedGate(S) {
     seal_in: null, seal_out: null, gate_out_at: null, gate_out_by: null};
   S.gateVisits = [
     {...base, id: "gv-1", pass_code: "K7Q2M9TX", purpose: "inbound", storer: "TGD", refs: ["ASN-55120"], vehicle_plate: "DXB K 48213", transporter: "Al Futtaim Logistics", driver_name: "Imran Shah", driver_mobile: "971501234567", seal_in: "SL-778812", gate_in_at: ago(150)},
-    {...base, id: "gv-2", pass_code: "B4N8W2PZ", purpose: "outbound", storer: "DEMO", refs: ["SO-2609290"], vehicle_plate: "SHJ 3 55102", transporter: "Fast Move", driver_name: "Rahul Nair", driver_mobile: "971552223344", gate_in_at: ago(35)},
+    {...base, id: "gv-2", pass_code: "B4N8W2PZ", purpose: "outbound", storer: "DEMO", refs: [], vehicle_plate: "SHJ 3 55102", transporter: "Fast Move", driver_name: "Rahul Nair", driver_mobile: "971552223344", gate_in_at: ago(35)},
     {...base, id: "gv-3", pass_code: "H3R6C8VD", purpose: "inbound", storer: "TGD", refs: ["PO-77120", "PO-77121"], vehicle_plate: "DXB P 90311", vehicle_type: "Container 40ft", transporter: "Gulf Hauliers", driver_name: "Muhammad Asif", status: "at_dock", dock_id: "dk-dxb-3", dock_in_at: ago(50), dock_in_by: "u-ali", gate_in_at: ago(80), seal_in: "SL-990021"},
     {...base, id: "gv-4", pass_code: "M2X9K4QW", purpose: "outbound", storer: "DEMO", refs: ["SO-2609299"], vehicle_plate: "AJM B 12045", vehicle_type: "Van", transporter: "City Couriers", driver_name: "Sanjay Kumar", status: "dock_done", dock_id: "dk-dxb-22", dock_in_at: ago(70), dock_in_by: "u-ali", dock_out_at: ago(10), dock_out_by: "u-ali", seal_out: "OUT-445120", gate_in_at: ago(95)},
     {...base, id: "gv-5", pass_code: "T8P3Z6NB", purpose: "other", storer: "", refs: [], vehicle_plate: "DXB A 7741", vehicle_type: "Car", driver_name: "Ahmed Saleh", notes: "Maintenance contractor", status: "out", gate_in_at: ago(240), gate_out_at: ago(180), gate_out_by: "u-sec"},
@@ -101,7 +186,9 @@ function seedGate(S) {
 }
 const gateList = () => S.gateVisits.map(v => { const s = S.sites.find(x => x.id === v.site_id) || {}, d = S.docks.find(x => x.id === v.dock_id) || {}, mins = (a, b) => a ? Math.round(((b ? Date.parse(b) : Date.now()) - Date.parse(a)) / 60000) : null;
   return {...v, site_name: s.name, dock_name: d.name || null, gate_in_name: uname(v.gate_in_by), dock_in_name: uname(v.dock_in_by), dock_out_name: uname(v.dock_out_by), gate_out_name: uname(v.gate_out_by),
-    wait_minutes: mins(v.gate_in_at, v.dock_in_at || v.gate_out_at), dock_minutes: mins(v.dock_in_at, v.dock_out_at), total_minutes: mins(v.gate_in_at, v.gate_out_at)}; });
+    wait_minutes: mins(v.gate_in_at, v.dock_in_at || v.gate_out_at), dock_minutes: mins(v.dock_in_at, v.dock_out_at), total_minutes: mins(v.gate_in_at, v.gate_out_at),
+    ck_before_needed: !!(S.ckTemplates && ckTemplateFor(v.purpose, v.storer, "before")), ck_after_needed: !!(S.ckTemplates && ckTemplateFor(v.purpose, v.storer, "after")),
+    ck_before: S.ckRuns ? (ckLatest(v.id, "before") || {}).result || null : null, ck_after: S.ckRuns ? (ckLatest(v.id, "after") || {}).result || null : null}; });
 function gateRpc(name, a, me, staff) {
   if (!me || !me.active) return E("Your user is not active");
   const gev = (v, event, x = {}) => S.gateEvents.push({id: "ge" + Date.now() + Math.random().toString(36).slice(2, 6), visit_id: v.id, event, user_id: me.id, created_at: tick(), ...x});
@@ -114,7 +201,6 @@ function gateRpc(name, a, me, staff) {
     if (!String(p.driver_name || "").trim()) return E("Enter the driver's name");
     const refs = (p.refs || []).map(x => String(x).trim().toUpperCase()).filter(Boolean);
     if (p.purpose === "inbound" && !refs.length) return E("Enter at least one ASN or PO number");
-    if (p.purpose === "outbound" && !refs.length) return E("Enter at least one order number");
     if (S.gateVisits.some(v => v.vehicle_plate.toUpperCase() === plate && ["in_yard", "at_dock", "dock_done"].includes(v.status))) return E(`Vehicle ${plate} is already inside. Gate it out first.`);
     const prob = [];
     [["eid_expiry", "Emirates ID"], ["licence_expiry", "Driving licence"], ["mulkiya_expiry", "Mulkiya"]].forEach(([k, l]) => { if (!p[k]) prob.push(l + " expiry missing"); else if (p[k] < today) prob.push(`${l} expired on ${p[k]}`); });
@@ -140,13 +226,17 @@ function gateRpc(name, a, me, staff) {
       const d = S.docks.find(x => x.id === a.p_dock && x.active); if (!d) return E("Choose a dock");
       if (d.site_id !== v.site_id) return E(`${d.name} is not at this vehicle's site`);
       const busy = S.gateVisits.find(x => x.dock_id === d.id && x.status === "at_dock"); if (busy) return E(`${d.name} is in use by ${busy.vehicle_plate}`);
-      Object.assign(v, {status: "at_dock", dock_id: d.id, dock_in_at: tick(), dock_in_by: me.id, updated_at: tick()}); gev(v, "dock_in", {dock_id: d.id, device: a.p_device});
+      const add = [...new Set((a.p_refs || []).map(x => String(x).trim().toUpperCase()).filter(Boolean))].filter(x => !(v.refs || []).includes(x));
+      if (v.purpose === "outbound" && !(v.refs || []).length && !add.length) return E("Enter at least one order number for this vehicle");
+      Object.assign(v, {status: "at_dock", dock_id: d.id, dock_in_at: tick(), dock_in_by: me.id, refs: [...(v.refs || []), ...add], updated_at: tick()});
+      gev(v, "dock_in", {dock_id: d.id, device: a.p_device, note: add.length ? (v.purpose === "outbound" ? "Orders " : "Added ") + add.join(", ") : null});
     } else if (a.p_step === "dock_out") {
       if (sec) return E("Dock out is done by the warehouse team");
       if (v.status !== "at_dock") return E(`Vehicle ${v.vehicle_plate} is not at a dock`);
-      const seal = String(a.p_seal || "").trim();
-      if (v.purpose === "outbound" && !seal) return E("Enter the seal number applied to the vehicle");
-      Object.assign(v, {status: "dock_done", dock_out_at: tick(), dock_out_by: me.id, seal_out: seal || null, updated_at: tick()}); gev(v, "dock_out", {dock_id: v.dock_id, note: seal ? "Seal " + seal : null, device: a.p_device});
+      const seal = String(a.p_seal || "").trim(), chk = ckDockOutCheck(v, seal);
+      if (chk.err) return E(chk.err);
+      Object.assign(v, {status: "dock_done", dock_out_at: tick(), dock_out_by: me.id, seal_out: seal || null, updated_at: tick()});
+      gev(v, "dock_out", {dock_id: v.dock_id, note: [chk.rej ? `Rejected at dock, not ${v.purpose === "inbound" ? "unloaded" : "loaded"}` : null, seal ? "Seal " + seal : null].filter(Boolean).join(" · ") || null, device: a.p_device});
     } else if (a.p_step === "gate_out") {
       if (v.purpose !== "other" && v.status !== "dock_done") return E(`Vehicle ${v.vehicle_plate} can't leave yet: ${v.status === "in_yard" ? "it hasn't been to a dock" : "it hasn't been docked out"}`);
       Object.assign(v, {status: "out", gate_out_at: tick(), gate_out_by: me.id, updated_at: tick()}); gev(v, "gate_out", {device: a.p_device});
@@ -307,7 +397,7 @@ const views = {
   reconciliation_list: () => S.reconciliations.map(r => { const s = S.sessions.find(x => x.id === r.session_id); return {...r, session_name: s.name, site: s.site, zone: s.zone, source_file: s.source_file, session_created_at: s.created_at, closed_at: s.closed_at, approved_by_name: uname(r.approved_by)}; }),
   event_list: () => S.events.map(e => { const l = S.lines.find(x => x.id === e.line_id); return {...e, user_name: uname(e.user_id), location: l ? l.location : e.location || null, sku: l ? l.sku : e.code || null}; }),
   qc_orders: () => S.qcOrders, qc_lines: () => S.qcLines, qc_order_list: qcList,
-  org_settings: () => S.org, sites: () => S.sites, docks: () => S.docks, gate_visits: () => S.gateVisits, gate_visit_list: gateList,
+  org_settings: () => S.org, sites: () => S.sites, docks: () => S.docks, checklist_templates: () => S.ckTemplates, checklist_runs: () => S.ckRuns.map(r => ({...r, submitted_by_name: uname(r.submitted_by), decided_by_name: uname(r.decided_by)})), gate_visits: () => S.gateVisits, gate_visit_list: gateList,
   gate_events: () => S.gateEvents.map(e => ({...e, user_name: uname(e.user_id), dock_name: (S.docks.find(d => d.id === e.dock_id) || {}).name || null})),
   qc_line_v: () => S.qcLines.map(l => { const o = S.qcOrders.find(x => x.id === l.order_id) || {}; return {...l, short_qty: l.expected_qty - l.scanned_qty, order_no: o.order_no, reference: o.reference, storer: o.storer, customer: o.customer, order_status: o.status, order_created_at: o.created_at}; }),
   qc_event_list: () => S.qcEvents.map(e => { const l = S.qcLines.find(x => x.id === e.line_id), o = S.qcOrders.find(x => x.id === e.order_id) || {}; return {...e, user_name: uname(e.user_id), sku: l ? l.sku : null, order_no: o.order_no}; })
@@ -348,13 +438,16 @@ function builder(table, me) {
         if (table === "count_sessions") { const s = {id: "s-" + Math.random().toString(36).slice(2, 8), site: "", zone: "", tolerance_pct: 2, blind: true, recount_other: false, recheck_pct: 5, confirm_location: true, rack_grouping: "last_segment", excess_batch: "optional", excess_mfg: "optional", excess_expiry: "required", status: "draft", source_file: null, created_by: me.id, created_at: tick(), opened_at: null, closed_at: null, closed_by: null, ...r}; S.sessions.push(s); return s; }
         if (table === "count_lines") { const l = {id: ++S.id, barcode: "", batch: "", units_per_case: 1, mfg_date: null, expiry_date: null, description: "", uom: "", unit_cost: 0, counted_qty: null, counted_by: null, counted_at: null, count_round: 0, recount_requested: false, accepted: false, accepted_by: null, accepted_at: null, is_found: false, expected_location: null, remarks: null, updated_at: tick(), ...r}; S.lines.push(l); return l; }
         if (table === "sites") { const x = {id: "site-" + Math.random().toString(36).slice(2, 8), code: "", active: true, created_at: tick(), ...r}; if (S.sites.some(y => y.name.toUpperCase() === String(x.name).toUpperCase())) return {__err: "A site with this name already exists"}; S.sites.push(x); return x; }
+        if (table === "checklist_templates") { const x = {id: "ckt-" + Math.random().toString(36).slice(2, 9), kind: "vehicle", storer: "", items: [], active: true, version: 1, updated_at: tick(), updated_by: me.id, ...r};
+          if (x.active && S.ckTemplates.some(y => y.active && y.kind === x.kind && (y.purpose || "") === (x.purpose || "") && (y.stage || "") === (x.stage || "") && y.storer.toUpperCase() === String(x.storer).toUpperCase())) return {__err: "An active checklist already exists for this. Turn the other one off first."};
+          S.ckTemplates.push(x); return x; }
         if (table === "docks") { const x = {id: "dk-" + Math.random().toString(36).slice(2, 9), kind: "both", active: true, sort: 0, ...r}; if (S.docks.some(y => y.site_id === x.site_id && y.name.toUpperCase() === String(x.name).toUpperCase())) return {__err: `${x.name} already exists at this site`}; S.docks.push(x); return x; }
         return r;
       });
       const bad = out.find(x => x && x.__err); if (bad) return {data: null, error: {message: bad.__err, code: "23505"}};
       return {data: st.single ? out[0] : st.returning ? out : null, error: null};
     }
-    const src = st.op === "select" ? (views[table] ? views[table]() : []) : (table === "count_sessions" ? S.sessions : table === "count_lines" ? S.lines : table === "profiles" ? S.users : table === "org_settings" ? S.org : table === "sites" ? S.sites : table === "docks" ? S.docks : []);
+    const src = st.op === "select" ? (views[table] ? views[table]() : []) : (table === "count_sessions" ? S.sessions : table === "count_lines" ? S.lines : table === "profiles" ? S.users : table === "org_settings" ? S.org : table === "sites" ? S.sites : table === "docks" ? S.docks : table === "checklist_templates" ? S.ckTemplates : []);
     let rows = src.filter(r => st.filters.every(f => f(r)));
     if (st.op === "update") { if (!staff && table !== "profiles") return {data: null, error: {message: "Permission denied", code: "42501"}}; rows.forEach(r => Object.assign(r, st.payload, table === "count_lines" ? {updated_at: tick()} : {})); return {data: null, error: null}; }
     if (st.op === "delete") {
@@ -443,6 +536,7 @@ function rpc(name, a, me) {
       s.status = "reconciled"; ev(s.id, null, "reconcile", {note: a.p_wms_reference}); return {data: "r", error: null}; }
     default: if (name.startsWith("qc_")) return qcRpc(name, a, me, staff);
       if (name.startsWith("gate_")) return gateRpc(name, a, me, staff);
+      if (name.startsWith("checklist_")) return ckRpc(name, a, me, staff);
   }
   return E("Unknown function " + name);
 }

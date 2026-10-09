@@ -30,7 +30,7 @@ async function loadBase() {
   const saved = X.ls.get("cc-site");
   G.site = G.sites.some(x => x.id === saved) ? saved : (G.sites.find(x => x.name === X.M.me.site) || G.sites[0] || {}).id || null;
 }
-function stop() { clearInterval(G.timer); G.timer = null; }
+function stop() { clearInterval(G.timer); G.timer = null; G.gen = (G.gen || 0) + 1; }
 function shell(title, body, dock, back) {
   $("#root").innerHTML = X.topbar(title, back ? `<button data-gt="${back}">Back</button>` : "", back ? "" : `<button data-act="signout">Sign out</button>`) +
     `<div class="wrap">${body}</div>${dock ? `<div class="dock">${dock}</div>` : ""}`;
@@ -42,13 +42,16 @@ function msg(kind, title, body) { return `<div class="alert ${kind}" role="${kin
 
 /* ---------- home: Gate (security) or Docks (warehouse) ---------- */
 async function home(mode, note) {
-  stop(); X.leaveSession(); G.mode = mode; G.view = "home"; G.visit = null; X.M.mode = mode; X.ls.set("cc-mode", mode);
+  X.leaveSession(); stop(); const gen = G.gen; G.mode = mode; G.view = "home"; G.visit = null; X.M.mode = mode; X.ls.set("cc-mode", mode);
+  const live = () => gen === G.gen && X.M.mode === mode && G.view === "home";
   shell(mode === "gate" ? "Gate" : "Docks", `${X.modeTabs(mode)}<div class="loading">Loading…</div>`);
   if (!X.isOnline()) { shell(mode === "gate" ? "Gate" : "Docks", `${X.modeTabs(mode)}${msg("warn", "No network", "The gate and dock screens need the network. Connect and try again.")}<button class="btn" data-gt="reload">Try again</button>`); return; }
-  try { await loadBase(); } catch { shell(mode === "gate" ? "Gate" : "Docks", `${X.modeTabs(mode)}${msg("bad", "Couldn't load the sites", "Check the network and try again.")}<button class="btn" data-gt="reload">Try again</button>`); return; }
+  try { await loadBase(); } catch { if (!live()) return; shell(mode === "gate" ? "Gate" : "Docks", `${X.modeTabs(mode)}${msg("bad", "Couldn't load the sites", "Check the network and try again.")}<button class="btn" data-gt="reload">Try again</button>`); return; }
+  if (!live()) return;
   if (!G.site) { shell(mode === "gate" ? "Gate" : "Docks", `${X.modeTabs(mode)}<div class="empty"><h3>No sites set up</h3><p>An administrator adds sites and docks on the console, under Settings.</p></div>`); return; }
   let rows = [];
   try { const r = await X.sb.from("gate_visit_list").select("*").eq("site_id", G.site).in("status", ["in_yard", "at_dock", "dock_done"]).order("gate_in_at"); if (r.error) throw r.error; rows = r.data; } catch {}
+  if (!live()) return;
   G.visits = rows;
   const card = v => `<button data-gt="visit" data-code="${esc(v.pass_code)}"><span class="nm">${esc(v.vehicle_plate)} <span class="xs ${v.status === "dock_done" ? "ok" : v.status === "at_dock" ? "info" : ""}">${STATUS[v.status]}${v.dock_name ? " · " + esc(v.dock_name) : ""}</span></span>
     <span class="small muted">${PURPOSE[v.purpose]}${v.storer ? " · " + esc(v.storer) : ""}${(v.refs || []).length ? " · " + esc(v.refs.join(", ")) : ""}</span><span class="small">${esc(v.driver_name)} · inside ${mins(v.gate_in_at)}</span></button>`;
@@ -64,12 +67,15 @@ async function home(mode, note) {
   shell(mode === "gate" ? "Gate" : "Docks", body);
   const sel = $("#gsite"); if (sel) sel.onchange = () => { G.site = sel.value; X.ls.set("cc-site", G.site); home(mode); };
   const s = $("#gscan"); s.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); const v = s.value.trim(); s.value = ""; if (v) scan(v); } }); s.focus({preventScroll: true});
-  G.timer = setInterval(() => { if (G.view === "home" && document.activeElement !== $("#gscan")) home(mode); }, 30000);
+  clearInterval(G.timer); G.timer = setInterval(() => { if (!live()) { stop(); return; } if (document.activeElement !== $("#gscan")) home(mode); }, 30000);
 }
 
 /* ---------- scanning a pass (or typing a plate) ---------- */
 async function scan(raw) {
-  if (G.view === "form") { const f = document.activeElement; if (f && f.dataset && f.dataset.scan) { f.value = raw; f.dispatchEvent(new Event("input")); } return; }
+  const fe = document.activeElement;
+  if (G.view === "visit" && fe && fe.id === "dref") { fe.value = raw; addDockRef(); return; }
+  if ((G.view === "form" || G.view === "visit") && fe && fe.dataset && fe.dataset.scan) { fe.value = raw; fe.dispatchEvent(new Event("input")); return; }
+  if (G.view === "form") return;
   const code = String(raw).trim().toUpperCase().replace(/^.*[?&]c=([A-Z0-9]+).*$/i, "$1");
   let r = await X.sb.from("gate_visit_list").select("*").eq("pass_code", code).limit(1);
   let v = !r.error && r.data[0];
@@ -104,19 +110,54 @@ async function openVisit(v, note) {
     if (v.status === "in_yard" && v.purpose !== "other") {
       const busy = new Set(((await X.sb.from("gate_visits").select("dock_id").eq("status", "at_dock")).data || []).map(x => x.dock_id));
       const free = G.docks.filter(d => d.site_id === v.site_id && !busy.has(d.id) && (d.kind === "both" || d.kind === v.purpose));
-      body = `${otherSite}${info}<div class="panel"><h3 style="margin-bottom:6px">Dock in: choose a free dock</h3>${free.length ? `<div class="dockpick">${free.map(d => `<button class="chip" data-gt="pick-dock" data-id="${esc(d.id)}">${esc(d.name)}</button>`).join("")}</div>` : `<p class="hint">No free ${v.purpose} dock at this site right now.</p>`}</div>`;
+      G.pickDock = null; G.dockRefs = [];
+      const orders = v.purpose === "outbound" ? `<div class="panel"><h3 style="margin-bottom:6px">Orders loading on this vehicle</h3>
+        <label class="field">${(v.refs || []).length ? "Add more order numbers (optional)" : "Order numbers (at least one)"}<span class="refadd"><input id="dref" placeholder="Scan or type, then Add" autocapitalize="characters" autocomplete="off"><button class="btn sm" data-gt="dref-add" type="button">Add</button></span></label>
+        <div class="chips" id="drefs"></div></div>` : "";
+      body = `${otherSite}${info}${orders}<div class="panel"><h3 style="margin-bottom:6px">Dock in: choose a free dock</h3>${free.length ? `<div class="dockpick">${free.map(d => `<button class="chip" data-gt="pick-dock" data-id="${esc(d.id)}">${esc(d.name)}</button>`).join("")}</div>` : `<p class="hint">No free ${v.purpose} dock at this site right now.</p>`}</div>`;
       dock = `<button class="btn primary save" data-gt="dock-in" disabled id="dockinbtn">Dock in</button><div class="row"><button class="btn ghost" data-gt="home">Cancel</button></div>`;
     } else if (v.status === "at_dock") {
-      body = `${otherSite}${info}<div class="panel"><h3 style="margin-bottom:6px">Dock out from ${esc(v.dock_name || "")}</h3>
-        <label class="field">Seal number ${v.purpose === "outbound" ? "applied to the vehicle (required)" : "(optional)"}<input id="gseal" autocapitalize="characters" autocomplete="off" data-scan="1"></label></div>`;
-      dock = `<button class="btn primary save" data-gt="dock-out">Dock out</button><div class="row"><button class="btn ghost" data-gt="home">Cancel</button></div>`;
+      // Checklists first: "before" right after dock in, "after" before dock out
+      let cks = [];
+      try { const r = await X.sb.rpc("checklist_status", {p_visit: v.id}); if (!r.error) cks = r.data || []; } catch {}
+      G.cks = cks;
+      const word = v.purpose === "inbound" ? "unloading" : "loading", label = st => st === "before" ? `Before ${word}` : "Before dock out";
+      const rejected = cks.find(c => c.run && c.run.result === "rejected");
+      const next = rejected ? null : cks.find(c => c.template && !(c.run && ["pass", "accepted"].includes(c.run.result)));
+      const rows = cks.map(c => { const r = c.run, res = r ? r.result : null;
+        return `<li class="ckrow ${res || "todo"}"><span><strong>${label(c.stage)}</strong><br><span class="small muted">${esc(c.template ? c.template.name : "")}</span>
+          ${res === "fail" ? `<br><span class="small bad">Failed: ${esc((r.failed || []).join("; "))}</span>` : ""}${(res === "accepted" || res === "rejected") && r.decision_note ? `<br><span class="small">${res === "accepted" ? "Accepted" : "Rejected"} by ${esc(r.decided_by_name || "supervisor")}: ${esc(r.decision_note)}</span>` : ""}
+          ${r && r.issues && r.issues.length ? `<br><span class="small warnc">Issues: ${esc(r.issues.join("; "))}</span>` : ""}</span>
+          <span class="ckres">${{pass: "✓ Passed", accepted: "✓ Accepted", fail: "✕ Failed", rejected: "✕ Rejected"}[res] || "To do"}</span></li>`; }).join("");
+      const ckPanel = cks.length ? `<div class="panel"><h3 style="margin-bottom:8px">Checklists</h3><ul class="cklist">${rows}</ul></div>` : "";
+      if (rejected) {
+        body = `${otherSite}${msg("bad", "Vehicle rejected at the dock", `Not ${v.purpose === "inbound" ? "unloaded" : "loaded"}. Dock it out so it can leave.`)}${info}${ckPanel}`;
+        dock = `<button class="btn primary save" data-gt="dock-out">Dock out (rejected)</button><div class="row"><button class="btn ghost" data-gt="home">Cancel</button></div>`;
+      } else if (next && next.run && next.run.result === "fail") {
+        body = `${otherSite}${msg("bad", "Checklist failed: stop, don't start " + (v.purpose === "inbound" ? "unloading" : "loading"), `Critical: ${esc((next.run.failed || []).join("; "))}. A supervisor must accept or reject the vehicle on the console. If the problem has been fixed, you can do the checklist again.`)}${info}${ckPanel}`;
+        dock = `<button class="btn primary save" data-gt="ck-start" data-stage="${next.stage}">Do the checklist again</button><div class="row"><button class="btn ghost" data-gt="refresh-visit">Refresh</button><button class="btn ghost" data-gt="home">Back</button></div>`;
+      } else if (next) {
+        body = `${otherSite}${info}${ckPanel}`;
+        dock = `<button class="btn primary save" data-gt="ck-start" data-stage="${next.stage}">Start checklist: ${label(next.stage).toLowerCase()}</button><div class="row"><button class="btn ghost" data-gt="home">Back</button></div>`;
+      } else {
+        body = `${otherSite}${info}${ckPanel}<div class="panel"><h3 style="margin-bottom:6px">Dock out from ${esc(v.dock_name || "")}</h3>
+          <label class="field">Seal number ${v.purpose === "outbound" ? "applied to the vehicle (required)" : "(optional)"}<input id="gseal" autocapitalize="characters" autocomplete="off" data-scan="1"></label></div>`;
+        dock = `<button class="btn primary save" data-gt="dock-out">Dock out</button><div class="row"><button class="btn ghost" data-gt="home">Cancel</button></div>`;
+      }
     } else {
       body = `${msg("info", STATUS[v.status], v.status === "dock_done" ? "Docked out. Security will gate it out." : v.purpose === "other" ? "This visit doesn't use a dock." : "")}${info}`;
       dock = `<button class="btn primary save" data-gt="home">Back</button>`;
     }
   }
   shell(v.vehicle_plate, `${note || ""}${body}`, dock, "home");
+  const dr = $("#dref"); if (dr) { dr.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); addDockRef(); } }); dr.focus({preventScroll: true}); }
 }
+function addDockRef() {
+  const i = $("#dref"); if (!i) return; const r = i.value.trim().toUpperCase(); i.value = ""; if (!r) return;
+  if (!G.dockRefs.includes(r) && !(G.visit.refs || []).includes(r)) G.dockRefs.push(r);
+  drawDockRefs(); i.focus();
+}
+function drawDockRefs() { const c = $("#drefs"); if (c) c.innerHTML = G.dockRefs.map((r, i) => `<button class="chip" data-gt="dref-del" data-i="${i}" aria-label="Remove ${esc(r)}">${esc(r)} ×</button>`).join(""); }
 
 /* ---------- gate in form ---------- */
 function newForm() {
@@ -128,7 +169,7 @@ function renderForm() {
   const doc = (k, label, numLabel) => `<div class="gdoc" data-doc="${k}"><h4>${label}</h4>
     <div class="grid2"><label class="field">${numLabel}<input id="g_${k}_no" value="${esc(f[k + "_no"] || "")}" autocapitalize="characters" autocomplete="off" data-scan="1"></label>
     <label class="field">Expiry date<input id="g_${k}_exp" type="date" value="${esc(f[k + "_exp"] || "")}"></label></div><p class="docstate" id="g_${k}_st"></p></div>`;
-  const refLabel = f.purpose === "inbound" ? "ASN / PO numbers" : f.purpose === "outbound" ? "Order numbers" : "Reference (optional)";
+  const refLabel = f.purpose === "inbound" ? "ASN / PO numbers" : f.purpose === "outbound" ? "Order numbers (optional: the warehouse adds them at dock in)" : "Reference (optional)";
   shell("Gate in", `
     <p class="small muted" style="margin:0 0 8px">${esc([siteName, G.org.company_name].filter(Boolean).join(" · "))}</p>
     <div class="seg" role="radiogroup" aria-label="Purpose">${["inbound", "outbound", "other"].map(p => `<button role="radio" aria-checked="${f.purpose === p}" data-gt="purpose" data-p="${p}">${PURPOSE[p]}</button>`).join("")}</div>
@@ -175,7 +216,6 @@ async function submit() {
   const pending = ($("#g_ref") || {}).value; if (pending && pending.trim()) addRef();
   if (f.purpose !== "other" && !String(f.storer || "").trim()) return err("Enter the storer / client");
   if (f.purpose === "inbound" && !f.refs.length) return err("Add at least one ASN or PO number");
-  if (f.purpose === "outbound" && !f.refs.length) return err("Add at least one order number");
   if (!String(f.vehicle_plate || "").trim()) return err("Enter the vehicle plate");
   if (!String(f.driver_name || "").trim()) return err("Enter the driver's name");
   if (f.ppe == null) return err("Answer the PPE question");
@@ -224,25 +264,105 @@ async function drawQR(canvas, text) {
   } catch { canvas.replaceWith(Object.assign(document.createElement("p"), {className: "hint", textContent: "The QR picture couldn't be drawn here. The driver can show the code instead."})); }
 }
 
+/* ---------- checklist form ---------- */
+function startChecklist(stage) {
+  const c = (G.cks || []).find(x => x.stage === stage); if (!c || !c.template) return;
+  G.ck = {stage, t: c.template, answers: {}, clientId: X.uuid ? X.uuid() : String(Date.now())};
+  G.view = "checklist"; stop(); renderChecklist();
+}
+function renderChecklist() {
+  const {t, answers} = G.ck, v = G.visit;
+  const row = it => {
+    const a = answers[it.id] || {}, photos = a.photos || [];
+    const tag = it.critical ? `<span class="xs bad">Critical</span>` : "";
+    let ctl = "";
+    if (it.type === "yesno") ctl = `<div class="seg ckseg ${it.na ? "three" : ""}">${[["yes", "Yes"], ["no", "No"], ...(it.na ? [["na", "N/A"]] : [])].map(([k, l]) => `<button data-gt="ck-ans" data-id="${esc(it.id)}" data-v="${k}" aria-pressed="${a.value === k}" class="${k}">${l}</button>`).join("")}</div>`;
+    else if (it.type === "number") ctl = `<div class="cknum"><input type="number" inputmode="decimal" step="any" data-ck-num="${esc(it.id)}" value="${a.value != null && a.value !== "na" ? esc(a.value) : ""}" ${a.value === "na" ? "disabled" : ""} placeholder="${it.min !== undefined && it.min !== "" || it.max !== undefined && it.max !== "" ? `${it.min ?? "…"} to ${it.max ?? "…"}` : ""}"><span>${esc(it.unit || "")}</span>${it.na ? `<button class="chip" data-gt="ck-ans" data-id="${esc(it.id)}" data-v="${a.value === "na" ? "" : "na"}" aria-pressed="${a.value === "na"}">N/A</button>` : ""}</div>`;
+    else if (it.type === "text") ctl = `<input class="cktext" data-ck-text="${esc(it.id)}" value="${esc(a.value || "")}">`;
+    const needPhoto = it.type === "photo" || (it.photo_on_no && a.value === "no");
+    const ph = it.type === "photo" || it.photo_on_no ? `<div class="thumbs" style="margin-top:8px">${photos.map((p, i) => `<span class="thumb"><img src="${esc(p.url)}" alt="Photo ${i + 1}"><button data-gt="ck-photo-del" data-id="${esc(it.id)}" data-i="${i}" aria-label="Remove photo">×</button></span>`).join("")}
+      ${needPhoto || photos.length ? `<button class="btn sm" data-gt="ck-photo" data-id="${esc(it.id)}">${X.CAM_ICON} ${photos.length ? "Add photo" : needPhoto ? "Take photo (required)" : "Add photo"}</button>` : ""}</div>` : "";
+    return `<li class="ckq ${a.value === "no" ? (it.critical ? "bad" : "warn") : ""}"><div class="ckt">${esc(it.text)} ${tag}</div>${ctl}${ph}</li>`;
+  };
+  shell(G.ck.stage === "before" ? `Before ${v.purpose === "inbound" ? "unloading" : "loading"}` : "Before dock out",
+    `<p class="small muted" style="margin:0 0 8px">${esc(v.vehicle_plate)} · ${esc(v.dock_name || "")} · ${esc(t.name)}</p><ol class="ckform">${t.items.map(row).join("")}</ol><div id="gmsg"></div>`,
+    `<button class="btn primary save" data-gt="ck-submit">Submit checklist</button><div class="row"><button class="btn ghost" data-gt="ck-cancel">Cancel</button></div>`, "ck-cancel");
+  $$("[data-ck-num]").forEach(i => i.oninput = () => { (G.ck.answers[i.dataset.ckNum] = G.ck.answers[i.dataset.ckNum] || {}).value = i.value; });
+  $$("[data-ck-text]").forEach(i => i.oninput = () => { (G.ck.answers[i.dataset.ckText] = G.ck.answers[i.dataset.ckText] || {}).value = i.value; });
+}
+async function compressImage(file) {
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); });
+  const k = Math.min(1, 1280 / Math.max(img.naturalWidth, img.naturalHeight)), c = document.createElement("canvas");
+  c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k); c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return await new Promise(r => c.toBlob(r, "image/jpeg", 0.7));
+}
+function ckPhoto(id) {
+  const inp = document.createElement("input"); inp.type = "file"; inp.accept = "image/*"; inp.setAttribute("capture", "environment");
+  inp.onchange = async () => {
+    const f = inp.files && inp.files[0]; if (!f) return;
+    try {
+      const blob = await compressImage(f), path = `gate/${G.visit.id}/${G.ck.stage}/${(X.uuid ? X.uuid() : Date.now())}.jpg`;
+      const r = await X.sb.storage.from("stowra-photos").upload(path, blob, {contentType: "image/jpeg", upsert: false});
+      if (r.error) throw r.error;
+      const a = G.ck.answers[id] = G.ck.answers[id] || {}; (a.photos = a.photos || []).push({path, url: URL.createObjectURL(blob)});
+      renderChecklist();
+    } catch { X.toast("The photo couldn't be uploaded. Check the network and try again.", true); }
+  };
+  inp.click();
+}
+async function submitChecklist() {
+  if (G.busy) return;
+  const {t, answers} = G.ck, err = m => { const g = $("#gmsg"); g.innerHTML = msg("bad", m, ""); g.scrollIntoView({block: "center"}); X.vibrate([150, 60, 150]); };
+  const missing = t.items.filter(it => { const a = answers[it.id] || {}; if (it.required === false) return false; if (it.type === "photo") return !(a.photos || []).length; return a.value == null || String(a.value).trim() === ""; });
+  if (missing.length) return err(`Answer every item: ${missing.length} left (${esc(missing[0].text)}${missing.length > 1 ? ", …" : ""})`);
+  const noPhoto = t.items.find(it => it.photo_on_no && (answers[it.id] || {}).value === "no" && !((answers[it.id] || {}).photos || []).length);
+  if (noPhoto) return err(`Take a photo for: ${esc(noPhoto.text)}`);
+  const payload = {}; Object.entries(answers).forEach(([k, a]) => { payload[k] = {value: a.value == null ? null : a.value, photos: (a.photos || []).map(p => p.path)}; });
+  G.busy = true;
+  try {
+    const r = await X.sb.rpc("checklist_submit", {p_visit: G.visit.id, p_stage: G.ck.stage, p_answers: payload, p_device: X.DEVICE, p_client_id: G.ck.clientId});
+    if (r.error) return err(esc(r.error.message));
+    const run = r.data; G.ck = null;
+    const nv = await refreshVisit(G.visit.pass_code);
+    if (run.result === "fail") { X.vibrate([300, 100, 300]); openVisit(nv || G.visit); }
+    else { X.vibrate(60); openVisit(nv || G.visit, msg("ok", "Checklist passed", run.issues && run.issues.length ? `Noted issues: ${esc(run.issues.join("; "))}` : "")); }
+  } catch { err("No network. Your answers are still here; try again."); }
+  finally { G.busy = false; }
+}
+
 /* ---------- taps ---------- */
 document.addEventListener("click", async e => {
   const b = e.target.closest("[data-gt]"); if (!b || !X) return;
   switch (b.dataset.gt) {
     case "home": case "reload": home(G.mode); break;
     case "new": newForm(); break;
+    case "ck-start": startChecklist(b.dataset.stage); break;
+    case "ck-ans": { const a = G.ck.answers[b.dataset.id] = G.ck.answers[b.dataset.id] || {}; a.value = b.dataset.v || null; renderChecklist(); break; }
+    case "ck-photo": ckPhoto(b.dataset.id); break;
+    case "ck-photo-del": { const a = G.ck.answers[b.dataset.id]; if (a && a.photos) a.photos.splice(+b.dataset.i, 1); renderChecklist(); break; }
+    case "ck-submit": submitChecklist(); break;
+    case "ck-cancel": G.ck = null; openVisit(G.visit); break;
+    case "refresh-visit": { const nv = await refreshVisit(G.visit.pass_code); openVisit(nv || G.visit); break; }
     case "visit": { const v = G.visits.find(x => x.pass_code === b.dataset.code); if (v) openVisit(v); break; }
     case "purpose": grab(); G.form.purpose = b.dataset.p; renderForm(); break;
     case "ppe": grab(); G.form.ppe = b.dataset.v === "1"; renderForm(); break;
     case "ref-add": addRef(); break;
+    case "dref-add": addDockRef(); break;
+    case "dref-del": G.dockRefs.splice(+b.dataset.i, 1); drawDockRefs(); break;
     case "ref-del": grab(); G.form.refs.splice(+b.dataset.i, 1); renderForm(); break;
     case "submit": submit(); break;
     case "whatsapp": window.open(G.wa, "_blank"); break;
     case "print-pass": window.print(); break;
     case "pick-dock": { $$(".dockpick .chip").forEach(c => c.setAttribute("aria-pressed", c === b)); G.pickDock = b.dataset.id; const di = $("#dockinbtn"); if (di) { di.disabled = false; di.textContent = `Dock in at ${b.textContent}`; } break; }
     case "dock-in": case "dock-out": case "gate-out": {
-      if (G.busy) break; G.busy = true; const v = G.visit, s = b.dataset.gt.replace("-", "_");
+      const v = G.visit, s = b.dataset.gt.replace("-", "_");
+      if (s === "dock_in" && $("#dref")) {
+        if ($("#dref").value.trim()) addDockRef();
+        if (v.purpose === "outbound" && !(v.refs || []).length && !G.dockRefs.length) { X.vibrate([150, 60, 150]); X.toast("Add at least one order number", true); $("#dref").focus(); break; }
+      }
+      if (G.busy) break; G.busy = true;
       try {
-        const r = await X.sb.rpc("gate_step", {p_code: v.pass_code, p_step: s, p_dock: s === "dock_in" ? G.pickDock : null, p_seal: s === "dock_out" ? ($("#gseal").value || "").trim() : null, p_device: X.DEVICE});
+        const r = await X.sb.rpc("gate_step", {p_code: v.pass_code, p_step: s, p_dock: s === "dock_in" ? G.pickDock : null, p_seal: s === "dock_out" && $("#gseal") ? ($("#gseal").value || "").trim() : null, p_device: X.DEVICE, p_refs: s === "dock_in" && G.dockRefs && G.dockRefs.length ? G.dockRefs : null});
         if (r.error) { X.vibrate([200, 80, 200]); const nv = await refreshVisit(v.pass_code); openVisit(nv || v, msg("bad", "Not done", esc(r.error.message))); break; }
         X.vibrate(60);
         home(G.mode, msg("ok", {dock_in: `${esc(v.vehicle_plate)} docked in`, dock_out: `${esc(v.vehicle_plate)} docked out`, gate_out: `${esc(v.vehicle_plate)} gated out`}[s], s === "dock_out" ? "Security can now gate it out." : ""));
@@ -253,6 +373,7 @@ document.addEventListener("click", async e => {
   }
 });
 
-window.CCGate = {init, home, scan, view: () => G.view};
+window.CCGate = {init, home, scan, stop, view: () => G.view};
+window.__ckDemo = () => G.ck;
 window.__gateDemo = () => X && ["gate", "dock"].includes(X.M.mode) ? {view: G.view, mode: G.mode, visits: G.visits, visit: G.visit, result: G.result} : null;
 })();

@@ -130,3 +130,19 @@ tr.over td{background:var(--bad-bg)}
   #qcprint .gpass-code{font:700 20pt/1 monospace;letter-spacing:2px;margin:3mm 0 5mm}
   #qcprint .gpass table td,#qcprint .gpass table th{text-align:left}
 }
+
+/* ---------- checklists ---------- */
+.ckwrap{display:grid;gap:12px;grid-template-columns:1fr}
+@media (min-width:1100px){.ckwrap{grid-template-columns:1fr 1fr}}
+.ckpanel{border-left:5px solid var(--line)}
+.ckpanel.pass,.ckpanel.accepted{border-left-color:var(--ok)} .ckpanel.fail,.ckpanel.rejected{border-left-color:var(--bad)} .ckpanel.todo{border-left-color:var(--warn)}
+.ckpanel table td{padding:6px 8px}
+.xs-crit{font-size:.7rem;font-weight:600;color:var(--bad);border:1px solid currentColor;border-radius:99px;padding:0 6px;margin-left:4px}
+.warnc{color:var(--warn)}
+tr.off td{opacity:.55}
+.ckedit{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:8px}
+.ckedit li{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--surface)}
+.ckline{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.ckn{font:700 1.1rem/1 var(--cond);color:var(--muted);width:22px}
+.ckopts{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:8px 0 0 28px}
+.ckopts .mini{min-width:0;width:80px;padding:5px 8px}

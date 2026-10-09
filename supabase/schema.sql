@@ -1119,6 +1119,70 @@ create or replace function public.my_job() returns text language sql stable secu
   select job from profiles where id = auth.uid() and active
 $$;
 
+-- Checklist tables (the checklist section further down explains them). Created here because dock out checks them.
+create table if not exists public.checklist_templates (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  kind        text not null default 'vehicle' check (kind in ('vehicle', 'general')),
+  purpose     text check (purpose in ('inbound', 'outbound')),
+  stage       text check (stage in ('before', 'after')),
+  storer      text not null default '',
+  items       jsonb not null default '[]'::jsonb,
+  active      boolean not null default true,
+  version     int not null default 1,
+  updated_at  timestamptz not null default now(),
+  updated_by  uuid references public.profiles (id) default auth.uid()
+);
+create unique index if not exists checklist_templates_slot_idx on public.checklist_templates (kind, coalesce(purpose, ''), coalesce(stage, ''), upper(storer)) where active;
+
+create table if not exists public.checklist_runs (
+  id             uuid primary key default gen_random_uuid(),
+  template_id    uuid references public.checklist_templates (id) on delete set null,
+  template_name  text not null,
+  template_version int not null default 1,
+  items          jsonb not null,
+  visit_id       uuid references public.gate_visits (id) on delete cascade,
+  stage          text,
+  answers        jsonb not null default '{}'::jsonb,
+  result         text not null check (result in ('pass', 'fail', 'accepted', 'rejected')),
+  failed         text[] not null default '{}',     -- critical items that failed
+  issues         text[] not null default '{}',     -- non-critical items answered No / out of range
+  photos         text[] not null default '{}',
+  submitted_by   uuid references public.profiles (id) default auth.uid(),
+  submitted_at   timestamptz not null default now(),
+  decided_by     uuid references public.profiles (id),
+  decided_at     timestamptz,
+  decision_note  text,
+  device         text,
+  client_id      uuid unique
+);
+create index if not exists checklist_runs_visit_idx on public.checklist_runs (visit_id, stage, submitted_at desc);
+
+alter table public.checklist_templates enable row level security;
+alter table public.checklist_runs enable row level security;
+drop policy if exists ck_templates_read on public.checklist_templates;
+create policy ck_templates_read on public.checklist_templates for select to authenticated using (public.my_role() is not null);
+drop policy if exists ck_templates_write on public.checklist_templates;
+create policy ck_templates_write on public.checklist_templates for all to authenticated using (public.is_admin()) with check (public.is_admin());
+drop policy if exists ck_runs_read on public.checklist_runs;
+create policy ck_runs_read on public.checklist_runs for select to authenticated using (public.my_role() is not null);
+grant select, insert, update, delete on public.checklist_templates to authenticated;
+grant select on public.checklist_runs to authenticated;
+revoke all on public.checklist_templates, public.checklist_runs from anon;
+
+-- The vehicle template that applies (client-specific first, then the general one).
+create or replace function public.checklist_template_for(p_purpose text, p_storer text, p_stage text)
+returns public.checklist_templates language sql stable security definer set search_path = public as $$
+  select t.* from checklist_templates t
+  where t.active and t.kind = 'vehicle' and t.purpose = p_purpose and t.stage = p_stage
+    and (t.storer = '' or upper(t.storer) = upper(coalesce(p_storer, '')))
+  order by (t.storer <> '') desc limit 1
+$$;
+create or replace function public.checklist_latest(p_visit uuid, p_stage text)
+returns public.checklist_runs language sql stable security definer set search_path = public as $$
+  select r.* from checklist_runs r where r.visit_id = p_visit and r.stage = p_stage order by r.submitted_at desc limit 1
+$$;
+
 -- Gate in (security). p: { site_id, purpose, storer, refs:[…], vehicle_plate, vehicle_type, transporter, driver_name, driver_mobile,
 --   eid_number, eid_expiry, licence_number, licence_expiry, mulkiya_number, mulkiya_expiry, ppe_ok, seal_in, notes }
 -- Expired documents or no PPE: the visit is recorded as rejected and the vehicle doesn't enter.
@@ -1133,7 +1197,7 @@ begin
   if nullif(trim(coalesce(p ->> 'driver_name', '')), '') is null then raise exception 'Enter the driver''s name'; end if;
   v_refs := coalesce(array(select upper(trim(x)) from jsonb_array_elements_text(coalesce(p -> 'refs', '[]'::jsonb)) x where trim(x) <> ''), '{}');
   if p ->> 'purpose' = 'inbound' and cardinality(v_refs) = 0 then raise exception 'Enter at least one ASN or PO number'; end if;
-  if p ->> 'purpose' = 'outbound' and cardinality(v_refs) = 0 then raise exception 'Enter at least one order number'; end if;
+  -- Outbound order numbers are usually not known at the gate: the warehouse adds them at dock in.
   if exists (select 1 from gate_visits where upper(vehicle_plate) = upper(trim(p ->> 'vehicle_plate')) and status in ('in_yard', 'at_dock', 'dock_done')) then
     raise exception 'Vehicle % is already inside. Gate it out first.', upper(trim(p ->> 'vehicle_plate'));
   end if;
@@ -1163,9 +1227,10 @@ begin
 end $$;
 
 -- Dock in / dock out / gate out, by pass code (scanned from the driver's phone or the printed pass).
-create or replace function public.gate_step(p_code text, p_step text, p_dock uuid default null, p_seal text default null, p_device text default null)
+drop function if exists public.gate_step(text, text, uuid, text, text);
+create or replace function public.gate_step(p_code text, p_step text, p_dock uuid default null, p_seal text default null, p_device text default null, p_refs text[] default null)
 returns jsonb language plpgsql security definer set search_path = public as $$
-declare v public.gate_visits; d public.docks; v_busy text;
+declare v public.gate_visits; d public.docks; v_busy text; v_refs text[]; v_new text[]; v_before public.checklist_runs; v_after public.checklist_runs; v_rej boolean;
 begin
   if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
   select * into v from gate_visits where pass_code = upper(trim(p_code)) for update;
@@ -1181,14 +1246,33 @@ begin
     if d.site_id <> v.site_id then raise exception '% is not at this vehicle''s site', d.name; end if;
     select g.vehicle_plate into v_busy from gate_visits g where g.dock_id = d.id and g.status = 'at_dock';
     if v_busy is not null then raise exception '% is in use by %', d.name, v_busy; end if;
-    update gate_visits set status = 'at_dock', dock_id = d.id, dock_in_at = now(), dock_in_by = auth.uid() where id = v.id returning * into v;
-    insert into gate_events (visit_id, event, dock_id, device) values (v.id, 'dock_in', d.id, p_device);
+    -- Order numbers (outbound) or extra ASN/PO numbers entered at dock in are added to the visit.
+    v_new := coalesce(array(select distinct upper(trim(x)) from unnest(coalesce(p_refs, '{}')) x where trim(x) <> '' and upper(trim(x)) <> all (v.refs)), '{}');
+    v_refs := v.refs || v_new;
+    if v.purpose = 'outbound' and cardinality(v_refs) = 0 then raise exception 'Enter at least one order number for this vehicle'; end if;
+    update gate_visits set status = 'at_dock', dock_id = d.id, dock_in_at = now(), dock_in_by = auth.uid(), refs = v_refs where id = v.id returning * into v;
+    insert into gate_events (visit_id, event, dock_id, note, device) values (v.id, 'dock_in', d.id,
+      case when cardinality(v_new) > 0 then case v.purpose when 'outbound' then 'Orders ' else 'Added ' end || array_to_string(v_new, ', ') end, p_device);
   elsif p_step = 'dock_out' then
     if public.my_job() = 'security' and not public.is_staff() then raise exception 'Dock out is done by the warehouse team'; end if;
     if v.status <> 'at_dock' then raise exception 'Vehicle % is not at a dock', v.vehicle_plate; end if;
-    if v.purpose = 'outbound' and nullif(trim(coalesce(p_seal, '')), '') is null then raise exception 'Enter the seal number applied to the vehicle'; end if;
+    -- Vehicle checklists: the "before" checklist (before loading/unloading) and the "after" checklist (before dock out)
+    -- must be passed, or accepted by a supervisor. A vehicle rejected at the dock may dock out without loading or a seal.
+    v_before := public.checklist_latest(v.id, 'before'); v_after := public.checklist_latest(v.id, 'after');
+    v_rej := coalesce(v_before.result, '') = 'rejected' or coalesce(v_after.result, '') = 'rejected';
+    if not v_rej then
+      if (public.checklist_template_for(v.purpose, v.storer, 'before')).id is not null and coalesce(v_before.result, '') not in ('pass', 'accepted') then
+        raise exception '%', case when v_before.result = 'fail' then 'The before-' || case v.purpose when 'inbound' then 'unloading' else 'loading' end || ' checklist failed. A supervisor must accept or reject the vehicle first.'
+                                  else 'Complete the before-' || case v.purpose when 'inbound' then 'unloading' else 'loading' end || ' checklist first.' end;
+      end if;
+      if (public.checklist_template_for(v.purpose, v.storer, 'after')).id is not null and coalesce(v_after.result, '') not in ('pass', 'accepted') then
+        raise exception '%', case when v_after.result = 'fail' then 'The dock-out checklist failed. A supervisor must accept or reject it first.' else 'Complete the dock-out checklist first.' end;
+      end if;
+      if v.purpose = 'outbound' and nullif(trim(coalesce(p_seal, '')), '') is null then raise exception 'Enter the seal number applied to the vehicle'; end if;
+    end if;
     update gate_visits set status = 'dock_done', dock_out_at = now(), dock_out_by = auth.uid(), seal_out = nullif(trim(coalesce(p_seal, '')), '') where id = v.id returning * into v;
-    insert into gate_events (visit_id, event, dock_id, note, device) values (v.id, 'dock_out', v.dock_id, case when v.seal_out is not null then 'Seal ' || v.seal_out end, p_device);
+    insert into gate_events (visit_id, event, dock_id, note, device) values (v.id, 'dock_out', v.dock_id,
+      nullif(concat_ws(' · ', case when v_rej then 'Rejected at dock, not ' || case v.purpose when 'inbound' then 'unloaded' else 'loaded' end end, case when v.seal_out is not null then 'Seal ' || v.seal_out end), ''), p_device);
   elsif p_step = 'gate_out' then
     if v.purpose <> 'other' and v.status <> 'dock_done' then
       raise exception 'Vehicle % can''t leave yet: %', v.vehicle_plate, case v.status when 'in_yard' then 'it hasn''t been to a dock' else 'it hasn''t been docked out' end;
@@ -1212,13 +1296,187 @@ begin
   insert into gate_events (visit_id, event, note) values (p_visit, 'cancel', trim(p_note));
 end $$;
 
+-- (gate_visit_list view: defined after the checklist section below)
+
+revoke all on function public.gate_in(jsonb, text), public.gate_step(text, text, uuid, text, text, text[]), public.gate_cancel(uuid, text), public.my_job() from public, anon;
+grant execute on function public.gate_in(jsonb, text), public.gate_step(text, text, uuid, text, text, text[]), public.gate_cancel(uuid, text), public.my_job() to authenticated;
+
+
+-- =====================================================================
+-- CHECKLISTS (version 6)
+-- One engine for every checklist: vehicle checks now, HSSEQ inspections later.
+-- A template is a list of items; each completed checklist ("run") keeps a copy of the items as they were,
+-- so later edits to a template never change past records.
+--
+-- Item: { "id": "i1", "text": "…", "type": "yesno" | "number" | "text" | "photo",
+--         "critical": true/false, "na": true/false (N/A allowed), "photo_on_no": true/false,
+--         "min": n, "max": n, "unit": "°C", "required": true/false (default true) }
+-- Answer (per item id): { "value": "yes" | "no" | "na" | number | text, "photos": ["path"], "note": "…" }
+-- Result: "fail" if a critical item is No or a critical number is out of range; otherwise "pass".
+-- A failed checklist waits for a supervisor: "accepted" (continue) or "rejected" (send the vehicle away).
+--
+-- Vehicle checklists: one template per purpose (inbound / outbound) and stage:
+--   before = after dock in, before loading/unloading;  after = before dock out.
+-- A template for one storer/client replaces the general one for that client. No active template = no checklist needed.
+-- =====================================================================
+-- What the phone needs for one visit: the templates that apply and the latest result of each.
+create or replace function public.checklist_status(p_visit uuid)
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare v public.gate_visits; out jsonb := '[]'::jsonb; st text; t public.checklist_templates; r public.checklist_runs;
+begin
+  if public.my_role() is null then return out; end if;
+  select * into v from gate_visits where id = p_visit; if not found or v.purpose = 'other' then return out; end if;
+  foreach st in array array['before', 'after'] loop
+    t := public.checklist_template_for(v.purpose, v.storer, st);
+    r := public.checklist_latest(v.id, st);
+    if t.id is not null or r.id is not null then
+      out := out || jsonb_build_object('stage', st,
+        'template', case when t.id is not null then jsonb_build_object('id', t.id, 'name', t.name, 'items', t.items, 'version', t.version) end,
+        'run', case when r.id is not null then jsonb_build_object('id', r.id, 'result', r.result, 'failed', r.failed, 'issues', r.issues, 'submitted_at', r.submitted_at,
+               'submitted_by_name', (select full_name from profiles where id = r.submitted_by), 'decision_note', r.decision_note,
+               'decided_by_name', (select full_name from profiles where id = r.decided_by)) end);
+    end if;
+  end loop;
+  return out;
+end $$;
+
+-- Submit a vehicle checklist (Docks screen). The database checks every answer against the template.
+create or replace function public.checklist_submit(p_visit uuid, p_stage text, p_answers jsonb, p_device text default null, p_client_id uuid default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare v public.gate_visits; t public.checklist_templates; prev public.checklist_runs; b public.checklist_runs; it jsonb; a jsonb; val text; num numeric;
+        v_failed text[] := '{}'; v_issues text[] := '{}'; v_photos text[] := '{}'; v_missing text[] := '{}'; ph text[]; v_bad boolean; v_run public.checklist_runs;
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  if p_client_id is not null and exists (select 1 from checklist_runs where client_id = p_client_id) then
+    select * into v_run from checklist_runs where client_id = p_client_id; return to_jsonb(v_run);
+  end if;
+  if p_stage not in ('before', 'after') then raise exception 'Unknown checklist stage'; end if;
+  select * into v from gate_visits where id = p_visit for update;
+  if not found then raise exception 'Visit not found'; end if;
+  if v.status <> 'at_dock' then raise exception 'Vehicle % is not at a dock', v.vehicle_plate; end if;
+  t := public.checklist_template_for(v.purpose, v.storer, p_stage);
+  if t.id is null then raise exception 'No checklist is set up for this'; end if;
+  prev := public.checklist_latest(v.id, p_stage);
+  if prev.result in ('pass', 'accepted') then raise exception 'This checklist is already done'; end if;
+  if prev.result = 'rejected' then raise exception 'The vehicle was rejected at the dock'; end if;
+  if p_stage = 'after' and (public.checklist_template_for(v.purpose, v.storer, 'before')).id is not null then
+    b := public.checklist_latest(v.id, 'before');
+    if coalesce(b.result, '') not in ('pass', 'accepted') then raise exception 'Complete the first checklist before this one'; end if;
+  end if;
+  for it in select * from jsonb_array_elements(t.items) loop
+    a := coalesce(p_answers -> (it ->> 'id'), '{}'::jsonb);
+    val := nullif(trim(coalesce(a ->> 'value', '')), '');
+    ph := coalesce(array(select jsonb_array_elements_text(coalesce(a -> 'photos', '[]'::jsonb))), '{}');
+    v_photos := v_photos || ph; v_bad := false;
+    if it ->> 'type' = 'photo' then
+      if cardinality(ph) = 0 and coalesce((it ->> 'required')::boolean, true) then v_missing := v_missing || (it ->> 'text'); end if;
+      continue;
+    end if;
+    if val is null then
+      if coalesce((it ->> 'required')::boolean, true) then v_missing := v_missing || (it ->> 'text'); end if;
+      continue;
+    end if;
+    if val = 'na' then
+      if not coalesce((it ->> 'na')::boolean, false) then v_missing := v_missing || (it ->> 'text'); end if;
+      continue;
+    end if;
+    if it ->> 'type' = 'yesno' then
+      if val not in ('yes', 'no') then v_missing := v_missing || (it ->> 'text'); continue; end if;
+      v_bad := val = 'no';
+      if v_bad and coalesce((it ->> 'photo_on_no')::boolean, false) and cardinality(ph) = 0 then raise exception 'Take a photo for: %', it ->> 'text'; end if;
+    elsif it ->> 'type' = 'number' then
+      begin num := val::numeric; exception when others then raise exception 'Enter a number for: %', it ->> 'text'; end;
+      v_bad := (it ? 'min' and it ->> 'min' <> '' and num < (it ->> 'min')::numeric) or (it ? 'max' and it ->> 'max' <> '' and num > (it ->> 'max')::numeric);
+    end if;
+    if v_bad then
+      if coalesce((it ->> 'critical')::boolean, false) then v_failed := v_failed || (it ->> 'text'); else v_issues := v_issues || (it ->> 'text'); end if;
+    end if;
+  end loop;
+  if cardinality(v_missing) > 0 then raise exception 'Answer: %', array_to_string(v_missing, '; '); end if;
+  insert into checklist_runs (template_id, template_name, template_version, items, visit_id, stage, answers, result, failed, issues, photos, device, client_id)
+  values (t.id, t.name, t.version, t.items, v.id, p_stage, coalesce(p_answers, '{}'::jsonb), case when cardinality(v_failed) > 0 then 'fail' else 'pass' end,
+          v_failed, v_issues, v_photos, p_device, p_client_id)
+  returning * into v_run;
+  insert into gate_events (visit_id, event, note, device)
+  values (v.id, 'checklist', t.name || ': ' || case when cardinality(v_failed) > 0 then 'FAILED (' || array_to_string(v_failed, '; ') || ')' else 'passed' end
+          || case when cardinality(v_issues) > 0 then ' · issues: ' || array_to_string(v_issues, '; ') else '' end, p_device);
+  return to_jsonb(v_run);
+end $$;
+
+-- Supervisor decision on a failed checklist: accept (continue) or reject (the vehicle leaves without loading/unloading).
+create or replace function public.checklist_decide(p_run uuid, p_decision text, p_note text)
+returns void language plpgsql security definer set search_path = public as $$
+declare r public.checklist_runs; v public.gate_visits;
+begin
+  if not public.is_staff() then raise exception 'Only supervisors can do this' using errcode = '42501'; end if;
+  if p_decision not in ('accept', 'reject') then raise exception 'Choose accept or reject'; end if;
+  if nullif(trim(coalesce(p_note, '')), '') is null then raise exception 'Enter a reason'; end if;
+  select * into r from checklist_runs where id = p_run for update;
+  if not found then raise exception 'Checklist not found'; end if;
+  if r.result <> 'fail' then raise exception 'This checklist doesn''t need a decision'; end if;
+  if (public.checklist_latest(r.visit_id, r.stage)).id <> r.id then raise exception 'A newer checklist exists for this vehicle'; end if;
+  select * into v from gate_visits where id = r.visit_id;
+  if v.status <> 'at_dock' then raise exception 'The vehicle is no longer at the dock'; end if;
+  update checklist_runs set result = case p_decision when 'accept' then 'accepted' else 'rejected' end, decided_by = auth.uid(), decided_at = now(), decision_note = trim(p_note) where id = r.id;
+  insert into gate_events (visit_id, event, note) values (r.visit_id, 'checklist', r.template_name || ': ' || case p_decision when 'accept' then 'accepted by supervisor' else 'vehicle REJECTED' end || ' · ' || trim(p_note));
+end $$;
+
+alter table public.gate_events drop constraint if exists gate_events_event_check;
+alter table public.gate_events add constraint gate_events_event_check check (event in ('gate_in', 'rejected', 'dock_in', 'dock_out', 'gate_out', 'note', 'cancel', 'checklist'));
+
+revoke all on function public.checklist_template_for(text, text, text), public.checklist_latest(uuid, text), public.checklist_status(uuid),
+  public.checklist_submit(uuid, text, jsonb, text, uuid), public.checklist_decide(uuid, text, text) from public, anon;
+grant execute on function public.checklist_template_for(text, text, text), public.checklist_latest(uuid, text), public.checklist_status(uuid),
+  public.checklist_submit(uuid, text, jsonb, text, uuid), public.checklist_decide(uuid, text, text) to authenticated;
+
+-- Standard vehicle checklists, added once (edit them on the console under Checklists). PPE is checked at the gate, so it isn't here.
+insert into public.checklist_templates (name, kind, purpose, stage, items)
+select x.name, 'vehicle', x.purpose, x.stage, x.items::jsonb from (values
+  ('Inbound: before unloading', 'inbound', 'before', '[
+    {"id":"i1","text":"Seal number matches the delivery documents","type":"yesno","critical":true,"photo_on_no":true},
+    {"id":"i2","text":"Seal intact, not broken or tampered","type":"yesno","critical":true,"photo_on_no":true},
+    {"id":"i3","text":"Delivery documents received (delivery note, packing list)","type":"yesno","critical":true},
+    {"id":"i4","text":"Vehicle body free of holes, leaks and damage","type":"yesno","photo_on_no":true},
+    {"id":"i5","text":"Cargo free of visible damage when doors opened","type":"yesno","photo_on_no":true},
+    {"id":"i6","text":"No pests, bad smell or contamination","type":"yesno","critical":true,"photo_on_no":true},
+    {"id":"i7","text":"Reefer temperature","type":"number","unit":"°C","na":true},
+    {"id":"i8","text":"Engine off, keys handed over","type":"yesno","critical":true},
+    {"id":"i9","text":"Wheel chocks in place","type":"yesno","critical":true},
+    {"id":"i10","text":"Dock leveller positioned safely","type":"yesno","critical":true}]'),
+  ('Inbound: before dock out', 'inbound', 'after', '[
+    {"id":"i1","text":"Vehicle fully unloaded","type":"yesno","critical":true},
+    {"id":"i2","text":"Shortages, excess or damages reported to the supervisor","type":"yesno","na":true},
+    {"id":"i3","text":"Dock area clear and safe","type":"yesno"},
+    {"id":"i4","text":"Wheel chocks removed, dock leveller raised","type":"yesno","critical":true}]'),
+  ('Outbound: before loading', 'outbound', 'before', '[
+    {"id":"i1","text":"Floor, walls and roof clean and dry","type":"yesno","critical":true,"photo_on_no":true},
+    {"id":"i2","text":"No holes, leaks or damage","type":"yesno","critical":true,"photo_on_no":true},
+    {"id":"i3","text":"No pests or bad smell","type":"yesno","critical":true,"photo_on_no":true},
+    {"id":"i4","text":"Reefer pre-cooled: temperature","type":"number","unit":"°C","na":true},
+    {"id":"i5","text":"Tyres and lights in good condition","type":"yesno"},
+    {"id":"i6","text":"Engine off, keys handed over","type":"yesno","critical":true},
+    {"id":"i7","text":"Wheel chocks in place","type":"yesno","critical":true},
+    {"id":"i8","text":"Dock leveller positioned safely","type":"yesno","critical":true}]'),
+  ('Outbound: before dock out', 'outbound', 'after', '[
+    {"id":"i1","text":"All orders loaded as per the loading list","type":"yesno","critical":true},
+    {"id":"i2","text":"Load secured with straps or bars","type":"yesno","critical":true,"photo_on_no":true},
+    {"id":"i3","text":"Photo of the loaded vehicle before closing the doors","type":"photo"},
+    {"id":"i4","text":"Doors closed and seal applied","type":"yesno","critical":true},
+    {"id":"i5","text":"Wheel chocks removed, dock leveller raised","type":"yesno","critical":true}]')
+) as x(name, purpose, stage, items)
+where not exists (select 1 from public.checklist_templates t where t.kind = 'vehicle' and t.purpose = x.purpose and t.stage = x.stage);
+
 drop view if exists public.gate_visit_list;
 create view public.gate_visit_list with (security_invoker = true) as
 select v.*, s.name as site_name, d.name as dock_name,
        gi.full_name as gate_in_name, di.full_name as dock_in_name, do_.full_name as dock_out_name, go.full_name as gate_out_name,
        round(extract(epoch from (coalesce(v.dock_in_at, v.gate_out_at, now()) - v.gate_in_at)) / 60) as wait_minutes,
        round(extract(epoch from (coalesce(v.dock_out_at, now()) - v.dock_in_at)) / 60)              as dock_minutes,
-       round(extract(epoch from (coalesce(v.gate_out_at, now()) - v.gate_in_at)) / 60)              as total_minutes
+       round(extract(epoch from (coalesce(v.gate_out_at, now()) - v.gate_in_at)) / 60)              as total_minutes,
+       (public.checklist_template_for(v.purpose, v.storer, 'before')).id is not null as ck_before_needed,
+       (public.checklist_template_for(v.purpose, v.storer, 'after')).id is not null  as ck_after_needed,
+       (public.checklist_latest(v.id, 'before')).result as ck_before,
+       (public.checklist_latest(v.id, 'after')).result  as ck_after
 from public.gate_visits v
 join public.sites s on s.id = v.site_id
 left join public.docks d on d.id = v.dock_id
@@ -1227,6 +1485,3 @@ left join public.profiles di on di.id = v.dock_in_by
 left join public.profiles do_ on do_.id = v.dock_out_by
 left join public.profiles go on go.id = v.gate_out_by;
 grant select on public.gate_visit_list to authenticated;
-
-revoke all on function public.gate_in(jsonb, text), public.gate_step(text, text, uuid, text, text), public.gate_cancel(uuid, text), public.my_job() from public, anon;
-grant execute on function public.gate_in(jsonb, text), public.gate_step(text, text, uuid, text, text), public.gate_cancel(uuid, text), public.my_job() to authenticated;

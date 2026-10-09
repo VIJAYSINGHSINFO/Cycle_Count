@@ -78,7 +78,22 @@ jobs:
           npx cap sync android
       - name: Load signing key
         if: ${{ env.KEYSTORE_B64 != '' }}
-        run: echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+        env:
+          CC_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CC_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          # Spaces, line breaks and quotes picked up while copy-pasting are removed before decoding
+          printf '%s' "$KEYSTORE_B64" | tr -d ' \r\n\t"' > "$RUNNER_TEMP/key.b64"
+          echo "Signing key text: $(wc -c < "$RUNNER_TEMP/key.b64") characters (the correct key is 3404)"
+          if ! base64 -d "$RUNNER_TEMP/key.b64" > "$RUNNER_TEMP/release.keystore" 2>/dev/null; then
+            echo "::error::The secret ANDROID_KEYSTORE_BASE64 isn't a valid key. Open keystore-base64.txt, press Ctrl+A then Ctrl+C, and paste it again into the secret (Settings > Secrets and variables > Actions > ANDROID_KEYSTORE_BASE64 > Update)."
+            exit 1
+          fi
+          if ! keytool -list -keystore "$RUNNER_TEMP/release.keystore" -storepass "$CC_KEYSTORE_PASSWORD" -alias "$CC_KEY_ALIAS" > /dev/null 2>&1; then
+            echo "::error::The key was read, but the password or alias doesn't match. Check the secrets ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_PASSWORD (same password) and ANDROID_KEY_ALIAS (stowra)."
+            exit 1
+          fi
+          echo "Signing key OK"
       - name: Build APK
         working-directory: mobile/android
         env:
