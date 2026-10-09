@@ -130,7 +130,7 @@ function renderForm() {
     <label class="field">Expiry date<input id="g_${k}_exp" type="date" value="${esc(f[k + "_exp"] || "")}"></label></div><p class="docstate" id="g_${k}_st"></p></div>`;
   const refLabel = f.purpose === "inbound" ? "ASN / PO numbers" : f.purpose === "outbound" ? "Order numbers" : "Reference (optional)";
   shell("Gate in", `
-    <p class="small muted" style="margin:0 0 8px">${esc(siteName)} · ${esc(G.org.company_name)}</p>
+    <p class="small muted" style="margin:0 0 8px">${esc([siteName, G.org.company_name].filter(Boolean).join(" · "))}</p>
     <div class="seg" role="radiogroup" aria-label="Purpose">${["inbound", "outbound", "other"].map(p => `<button role="radio" aria-checked="${f.purpose === p}" data-gt="purpose" data-p="${p}">${PURPOSE[p]}</button>`).join("")}</div>
     <div class="panel"><h3>Load</h3>
       <label class="field">Storer / client${f.purpose === "other" ? " (optional)" : ""}<input id="g_storer" value="${esc(f.storer || "")}" autocapitalize="characters"></label>
@@ -196,7 +196,7 @@ async function submit() {
 function passLink(v) {
   const base = String(G.org.pass_base_url || "").trim(); if (!base) return "";
   const u = new URL(base, location.href);
-  u.searchParams.set("c", v.pass_code); u.searchParams.set("p", v.vehicle_plate); u.searchParams.set("n", G.org.company_name);
+  u.searchParams.set("c", v.pass_code); u.searchParams.set("p", v.vehicle_plate); if (G.org.company_name) u.searchParams.set("n", G.org.company_name);
   u.searchParams.set("s", (G.sites.find(s => s.id === v.site_id) || {}).name || ""); u.searchParams.set("t", v.gate_in_at);
   return u.href;
 }
@@ -209,7 +209,7 @@ function renderResult() {
     return;
   }
   const link = passLink(v);
-  const text = `${G.org.company_name}: gate pass ${v.pass_code} for vehicle ${v.vehicle_plate}.${link ? ` Show this QR code at the dock and at the gate: ${link}` : " Show this code at the dock and at the gate."}`;
+  const text = `${G.org.company_name || "Stowra"}: gate pass ${v.pass_code} for vehicle ${v.vehicle_plate}.${link ? ` Show this QR code at the dock and at the gate: ${link}` : " Show this code at the dock and at the gate."}`;
   G.wa = `https://wa.me/${uaeMobile(v.driver_mobile)}?text=${encodeURIComponent(text)}`;
   shell("Gate pass", `<div class="gclear ok"><div class="big">✓</div><h2>${esc(v.vehicle_plate)} may enter</h2><p>Pass <strong class="mono">${esc(v.pass_code)}</strong>. Send it to the driver now.</p></div>
     <div class="panel passqr"><canvas id="gqr" aria-label="QR code of the gate pass"></canvas><div class="mono big2">${esc(v.pass_code)}</div><p class="small muted">${esc(v.driver_name)} · ${esc(v.driver_mobile ? "+" + v.driver_mobile : "")}</p></div>

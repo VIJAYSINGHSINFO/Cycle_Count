@@ -131,7 +131,7 @@ function printPass() {
   let img = "";
   try { const c = document.createElement("canvas"); window.bwipjs.toCanvas(c, {bcid: "qrcode", text: v.pass_code, scale: 6, eclevel: "M"}); img = c.toDataURL("image/png"); } catch {}
   let p = $("#qcprint"); if (!p) { p = document.createElement("div"); p.id = "qcprint"; document.body.appendChild(p); }
-  p.innerHTML = `<div class="gpass"><div class="gpass-co">${C.esc(org.company_name)}</div><h1>Gate pass</h1>${img ? `<img src="${img}" alt="QR code">` : ""}<div class="gpass-code">${C.esc(v.pass_code)}</div>
+  p.innerHTML = `<div class="gpass">${org.company_name ? `<div class="gpass-co">${C.esc(org.company_name)}</div>` : ""}<h1>Gate pass</h1>${img ? `<img src="${img}" alt="QR code">` : ""}<div class="gpass-code">${C.esc(v.pass_code)}</div>
     <table><tbody><tr><th>Vehicle</th><td>${C.esc(v.vehicle_plate)}</td></tr><tr><th>Driver</th><td>${C.esc(v.driver_name)}</td></tr><tr><th>Purpose</th><td>${PURPOSE[v.purpose]}${(v.refs || []).length ? " · " + C.esc(v.refs.join(", ")) : ""}</td></tr>
     <tr><th>Site</th><td>${C.esc(v.site_name)}</td></tr><tr><th>Gate in</th><td>${C.esc(new Date(v.gate_in_at).toLocaleString())}</td></tr></tbody></table>
     <p>Show this pass at the dock and at the gate when leaving.</p></div>`;
@@ -163,7 +163,7 @@ async function pageSettings(main) {
   main.innerHTML = `<div class="pagehead"><div><h1>Settings</h1><p class="muted small" style="margin:4px 0 0">Company details, sites and docks. Everything in Stowra reads them from here, so a change here updates screens, gate passes and reports.</p></div></div>
     <div class="panel" style="max-width:760px"><h2 style="margin-bottom:10px">Company</h2>
       <form id="orgf" class="grid-form">
-        <label class="field" style="grid-column:1/-1">Company name<input name="company" required value="${C.esc(B.org.company_name)}"></label>
+        <label class="field" style="grid-column:1/-1">Company name (optional)<input name="company" value="${C.esc(B.org.company_name)}" placeholder="Leave empty until decided"><span class="hint">Shown in the sidebar, on gate passes and in WhatsApp messages. While it's empty, they just say Stowra. You can add or change it any time.</span></label>
         <label class="field" style="grid-column:1/-1">Gate pass page address (sent to drivers on WhatsApp)<input name="passurl" value="${C.esc(B.org.pass_base_url || defUrl)}"><span class="hint">Usually your Stowra web address followed by <code>/pass/</code>. Suggested: ${C.esc(defUrl)}</span></label>
         <label class="field">Highlight vehicles inside longer than (minutes)<input name="alert" type="number" min="10" step="5" value="${C.esc(B.org.yard_alert_minutes)}"></label>
         <div class="row" style="grid-column:1/-1"><button class="btn primary">Save company settings</button></div></form></div>

@@ -20,7 +20,7 @@ p{color:var(--muted);font-size:.9rem;margin:0}.bad{color:#B3321C;font-weight:600
 <script>
 // The pass carries only the pass code and the plate. Personal details stay in the database.
 const q = new URLSearchParams(location.search), code = (q.get("c") || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
-document.getElementById("co").textContent = q.get("n") || "";
+document.getElementById("co").textContent = q.get("n") || "Stowra";
 document.getElementById("code").textContent = code || "—";
 const add = (k, v) => { if (!v) return; const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = k; dd.textContent = v; document.getElementById("dl").append(dt, dd); };
 add("Vehicle", q.get("p")); add("Site", q.get("s"));

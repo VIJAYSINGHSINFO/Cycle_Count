@@ -73,7 +73,7 @@ if (!S.gateVisits) seedGate(S);
 function seedGate(S) {
   if (!S.users.some(u => u.id === "u-sec")) S.users.push({id: "u-sec", full_name: "Rashid Khan", email: "rashid@demo.local", role: "counter", job: "security", site: "DXB Warehouse", active: true});
   S.users.forEach(u => { if (!u.job) u.job = "operator"; });
-  S.org = [{id: 1, company_name: "RSA Global", pass_base_url: "", yard_alert_minutes: 120, updated_at: "2026-10-01T06:00:00Z"}];
+  S.org = [{id: 1, company_name: "", pass_base_url: "", yard_alert_minutes: 120, updated_at: "2026-10-01T06:00:00Z"}];
   S.sites = [{id: "site-dxb", name: "DXB Warehouse", code: "DXB", active: true, created_at: "2026-10-01T06:00:00Z"}, {id: "site-auh", name: "AUH Warehouse", code: "AUH", active: true, created_at: "2026-10-01T06:00:00Z"}];
   S.docks = [];
   for (let i = 1; i <= 40; i++) S.docks.push({id: "dk-dxb-" + i, site_id: "site-dxb", name: "Dock " + String(i).padStart(2, "0"), kind: i <= 20 ? "inbound" : "outbound", active: true, sort: i});

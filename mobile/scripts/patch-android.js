@@ -7,6 +7,9 @@ if (!fs.existsSync(man) || !fs.existsSync(gradle)) { console.error("Android proj
 let x = fs.readFileSync(man, "utf8");
 if (!x.includes("com.google.mlkit.vision.DEPENDENCIES"))
   x = x.replace(/<application([^>]*)>/, m => `${m}\n        <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="barcode_ui"/>`);
+// Camera: needed to take photos of damaged stock (the barcode scanner itself uses Google's scanner and needs no permission)
+if (!x.includes("android.permission.CAMERA"))
+  x = x.replace(/<application/, '<uses-permission android:name="android.permission.CAMERA"/>\n    <uses-feature android:name="android.hardware.camera" android:required="false"/>\n    <application');
 if (!x.includes("android:screenOrientation")) x = x.replace(/<activity\b/, '<activity android:screenOrientation="portrait"');
 if (!x.includes("android:windowSoftInputMode")) x = x.replace(/<activity\b/, '<activity android:windowSoftInputMode="adjustResize"');
 fs.writeFileSync(man, x);

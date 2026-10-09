@@ -993,12 +993,14 @@ create policy stowra_photos_read on storage.objects for select to authenticated
 -- =====================================================================
 create table if not exists public.org_settings (
   id                 int primary key default 1 check (id = 1),
-  company_name       text not null default 'Your company',
+  company_name       text not null default '',   -- optional: leave empty until the name is decided; nothing shows it then
   pass_base_url      text not null default '',        -- web address of the gate pass page, e.g. https://you.github.io/stowra/pass/
   yard_alert_minutes int  not null default 120 check (yard_alert_minutes > 0),
   updated_at         timestamptz not null default now()
 );
 insert into public.org_settings (id) values (1) on conflict (id) do nothing;
+alter table public.org_settings alter column company_name set default '';
+update public.org_settings set company_name = '' where company_name = 'Your company';
 
 create table if not exists public.sites (
   id          uuid primary key default gen_random_uuid(),

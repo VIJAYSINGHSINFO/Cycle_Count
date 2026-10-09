@@ -92,7 +92,7 @@ function renderShell() {
   onRoute();
 }
 window.addEventListener("hashchange", () => { if ($("#main")) onRoute(); });
-async function loadOrgName() { try { const o = await q(sb.from("org_settings").select("company_name").eq("id", 1).single()); const el = $("#orgname"); if (el) el.textContent = o.company_name; document.title = `Stowra · ${o.company_name}`; } catch {} }
+async function loadOrgName() { try { const o = await q(sb.from("org_settings").select("company_name").eq("id", 1).single()); const el = $("#orgname"); if (el) el.textContent = o.company_name || ""; document.title = o.company_name ? `Stowra · ${o.company_name}` : "Stowra console"; } catch {} }
 window.addEventListener("stowra-org", loadOrgName);
 function onRoute() {
   stopTimer();
