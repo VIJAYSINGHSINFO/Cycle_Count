@@ -1,7 +1,7 @@
 # Builds everything whenever you change the code, or when you click "Run workflow" on the Actions tab:
 #  - the website (console + mobile web app) on GitHub Pages
 #  - the Android app (APK), downloadable from the run's Artifacts section
-name: Build Cycle Count
+name: Build Stowra
 
 on:
   push:
@@ -41,6 +41,8 @@ jobs:
           node scripts/build-site.js
         env:
           SITE_URL: ${{ steps.pages.outputs.base_url }}
+          COMPANY_NAME: ${{ vars.COMPANY_NAME }}
+          PRIVACY_EMAIL: ${{ vars.PRIVACY_EMAIL }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
@@ -93,10 +95,16 @@ jobs:
           else
             ./gradlew assembleDebug --no-daemon
           fi
+      - name: Name the files clearly
+        run: |
+          mkdir -p out
+          for f in $(find mobile/android/app/build/outputs -name "*.apk" -o -name "*.aab"); do
+            kind=$([ "${f##*.}" = "aab" ] && echo "google-play" || echo "install"); sig=$(echo "$f" | grep -q release && echo "" || echo "-TEST-ONLY")
+            cp "$f" "out/stowra-1.0.${{ github.run_number }}-${kind}${sig}.${f##*.}"
+          done
+          ls -la out
       - uses: actions/upload-artifact@v4
         with:
-          name: cycle-count-android
-          path: |
-            mobile/android/app/build/outputs/apk/**/*.apk
-            mobile/android/app/build/outputs/bundle/**/*.aab
+          name: stowra-android-1.0.${{ github.run_number }}
+          path: out/*
           if-no-files-found: error
