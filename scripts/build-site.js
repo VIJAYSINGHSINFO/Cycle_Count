@@ -6,9 +6,10 @@ const apk = process.env.APK_URL || "";
 fs.rmSync(out, {recursive: true, force: true});
 fs.cpSync("desktop", path.join(out, "console"), {recursive: true});
 fs.cpSync("mobile/www", path.join(out, "mobile"), {recursive: true});
-fs.cpSync("pass", path.join(out, "pass"), {recursive: true});
+if (fs.existsSync("pass")) fs.cpSync("pass", path.join(out, "pass"), {recursive: true});   // gate pass page sent to drivers on WhatsApp
+else console.log("Note: the pass folder is missing, so the driver's gate pass page isn't published. Upload the pass folder.");
 // Privacy policy (Google Play needs a public address): company and contact come from the repository variables COMPANY_NAME and PRIVACY_EMAIL
-{ const co = process.env.COMPANY_NAME || "the company that operates this app", mail = process.env.PRIVACY_EMAIL || "";
+if (fs.existsSync("docs/privacy-policy.html")) { const co = process.env.COMPANY_NAME || "the company that operates this app", mail = process.env.PRIVACY_EMAIL || "";
   const h = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
   fs.mkdirSync(path.join(out, "privacy"), {recursive: true});
   fs.writeFileSync(path.join(out, "privacy", "index.html"), fs.readFileSync("docs/privacy-policy.html", "utf8").replace(/\{\{COMPANY\}\}/g, h(co)).replace(/\{\{EMAIL\}\}/g, h(mail || "your administrator")).replace(/\{\{DATE\}\}/g, new Date().toISOString().slice(0, 10))); }   // gate pass page sent to drivers on WhatsApp
