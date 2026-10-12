@@ -185,3 +185,5 @@ input[type=number]{-moz-appearance:textfield;appearance:textfield}
 .cknum{display:flex;gap:8px;align-items:center}
 .cknum input{flex:1;min-width:0;font:700 1.4rem/1 var(--cond);padding:10px;border:2px solid var(--line);border-radius:8px;text-align:center;background:var(--surface)}
 .cktext{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;box-sizing:border-box}
+/* five tabs on one row */
+.modes.many button{font-size:.95rem;padding:10px 2px;letter-spacing:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

@@ -1485,3 +1485,500 @@ left join public.profiles di on di.id = v.dock_in_by
 left join public.profiles do_ on do_.id = v.dock_out_by
 left join public.profiles go on go.id = v.gate_out_by;
 grant select on public.gate_visit_list to authenticated;
+
+-- =====================================================================
+-- Version 7: clients, items, locations and Stowra's own stock record.
+--   Stock can be loaded from your WMS stock report (one row per pallet / LPN).
+--   Every change is written to stock_moves, so each item has a full history.
+-- =====================================================================
+
+-- Clients (storers) and their rules
+create table if not exists public.clients (
+  id                    uuid primary key default gen_random_uuid(),
+  code                  text not null unique,            -- storer key, stored in capitals (e.g. FIXPRICE, TGD)
+  name                  text not null default '',
+  active                boolean not null default true,
+  track_batch           text not null default 'optional' check (track_batch in ('off', 'optional', 'required')),
+  track_expiry          text not null default 'optional' check (track_expiry in ('off', 'optional', 'required')),
+  track_mfg             text not null default 'optional' check (track_mfg in ('off', 'optional', 'required')),
+  batch_label           text not null default 'Batch',   -- what the batch field means for this client (e.g. "Container no.")
+  ref2_label            text not null default 'Lot ref 2',
+  allocation            text not null default 'FEFO' check (allocation in ('FEFO', 'FIFO')),
+  min_life_receive_pct  numeric not null default 0 check (min_life_receive_pct between 0 and 100),  -- refuse receipts with less shelf life left
+  min_life_ship_days    integer not null default 0 check (min_life_ship_days >= 0),                 -- don't pick stock expiring sooner than this
+  near_expiry_days      integer not null default 90 check (near_expiry_days >= 0),
+  auto_hold_expired     boolean not null default true,
+  notes                 text not null default '',
+  created_at            timestamptz not null default now(),
+  updated_at            timestamptz not null default now()
+);
+
+-- Item master (one row per client + SKU)
+create table if not exists public.items (
+  id               bigserial primary key,
+  client_id        uuid not null references public.clients (id) on delete cascade,
+  sku              text not null,                        -- stored in capitals
+  description      text not null default '',
+  barcode          text not null default '',
+  base_uom         text not null default 'Each',
+  case_qty         numeric not null default 1 check (case_qty > 0),
+  case_uom         text not null default 'Case',
+  item_group       text not null default '',
+  item_group2      text not null default '',
+  shelf_life_days  integer not null default 0 check (shelf_life_days >= 0),
+  unit_cost        numeric not null default 0,
+  active           boolean not null default true,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now(),
+  unique (client_id, sku)
+);
+create index if not exists items_barcode_idx on public.items (barcode) where barcode <> '';
+create index if not exists items_sku_idx on public.items (sku);
+
+-- Locations
+create table if not exists public.locations (
+  id             bigserial primary key,
+  code           text not null unique,                   -- stored in capitals
+  site_id        uuid references public.sites (id) on delete set null,
+  zone           text not null default '',
+  kind           text not null default 'storage' check (kind in ('storage', 'pick', 'staging', 'outbound', 'dock', 'damage', 'short', 'quarantine')),
+  hold           boolean not null default false,         -- stock here is not available (damage, short, quarantine)
+  mixed_allowed  boolean not null default true,          -- more than one SKU may be stored here
+  active         boolean not null default true,
+  notes          text not null default '',
+  created_at     timestamptz not null default now()
+);
+
+-- Stock: one row per pallet (LPN) / batch / location
+create table if not exists public.inventory (
+  id             bigserial primary key,
+  client_id      uuid not null references public.clients (id) on delete cascade,
+  item_id        bigint not null references public.items (id) on delete cascade,
+  location_id    bigint not null references public.locations (id),
+  lpn            text not null default '',
+  batch          text not null default '',
+  ref2           text not null default '',
+  mfg_date       date,
+  expiry_date    date,
+  received_at    timestamptz,
+  asn            text not null default '',
+  ext_ref        text not null default '',
+  qty            numeric not null default 0 check (qty >= 0),
+  allocated_qty  numeric not null default 0 check (allocated_qty >= 0),
+  picked_qty     numeric not null default 0 check (picked_qty >= 0),
+  status         text not null default 'ok' check (status in ('ok', 'hold')),
+  hold_reason    text not null default '',
+  updated_at     timestamptz not null default now(),
+  updated_by     uuid references public.profiles (id)
+);
+create index if not exists inventory_item_idx on public.inventory (item_id);
+create index if not exists inventory_loc_idx on public.inventory (location_id);
+create index if not exists inventory_lpn_idx on public.inventory (lpn) where lpn <> '';
+create index if not exists inventory_client_idx on public.inventory (client_id);
+
+-- Stock history: every import change, move, hold, release and adjustment
+create table if not exists public.stock_moves (
+  id           bigserial primary key,
+  created_at   timestamptz not null default now(),
+  user_id      uuid references public.profiles (id),
+  kind         text not null check (kind in ('import', 'move', 'adjust', 'hold', 'release', 'receive', 'pick', 'ship')),
+  client_id    uuid references public.clients (id) on delete cascade,
+  item_id      bigint references public.items (id) on delete cascade,
+  inventory_id bigint,
+  from_loc     text not null default '',
+  to_loc       text not null default '',
+  lpn          text not null default '',
+  batch        text not null default '',
+  expiry_date  date,
+  qty          numeric,                                  -- quantity moved, or the change (+/-) for imports and adjustments
+  qty_before   numeric,
+  qty_after    numeric,
+  reason       text not null default '',
+  note         text not null default '',
+  ref          text not null default '',
+  device       text,
+  client_uuid  uuid unique                               -- the phone's id for this action (stops double saves)
+);
+create index if not exists stock_moves_item_idx on public.stock_moves (item_id, created_at desc);
+create index if not exists stock_moves_time_idx on public.stock_moves (created_at desc);
+
+-- Stock file imports (rows are staged, then applied in one go)
+create table if not exists public.stock_imports (
+  id          uuid primary key default gen_random_uuid(),
+  file_name   text not null default '',
+  status      text not null default 'staging' check (status in ('staging', 'done')),
+  summary     jsonb not null default '{}',
+  created_by  uuid references public.profiles (id) default auth.uid(),
+  created_at  timestamptz not null default now(),
+  finished_at timestamptz
+);
+create table if not exists public.stock_import_rows (
+  import_id  uuid not null references public.stock_imports (id) on delete cascade,
+  row_no     integer not null,
+  data       jsonb not null,
+  primary key (import_id, row_no)
+);
+
+alter table public.clients enable row level security;
+alter table public.items enable row level security;
+alter table public.locations enable row level security;
+alter table public.inventory enable row level security;
+alter table public.stock_moves enable row level security;
+alter table public.stock_imports enable row level security;
+alter table public.stock_import_rows enable row level security;
+
+drop policy if exists clients_read on public.clients;
+create policy clients_read on public.clients for select to authenticated using (public.my_role() is not null);
+drop policy if exists clients_write on public.clients;
+create policy clients_write on public.clients for all to authenticated using (public.is_staff()) with check (public.is_staff());
+drop policy if exists items_read on public.items;
+create policy items_read on public.items for select to authenticated using (public.my_role() is not null);
+drop policy if exists items_write on public.items;
+create policy items_write on public.items for all to authenticated using (public.is_staff()) with check (public.is_staff());
+drop policy if exists locations_read on public.locations;
+create policy locations_read on public.locations for select to authenticated using (public.my_role() is not null);
+drop policy if exists locations_write on public.locations;
+create policy locations_write on public.locations for all to authenticated using (public.is_staff()) with check (public.is_staff());
+drop policy if exists inventory_read on public.inventory;
+create policy inventory_read on public.inventory for select to authenticated using (public.my_role() is not null);
+drop policy if exists stock_moves_read on public.stock_moves;
+create policy stock_moves_read on public.stock_moves for select to authenticated using (public.my_role() is not null);
+drop policy if exists stock_imports_staff on public.stock_imports;
+create policy stock_imports_staff on public.stock_imports for all to authenticated using (public.is_staff()) with check (public.is_staff());
+drop policy if exists stock_import_rows_staff on public.stock_import_rows;
+create policy stock_import_rows_staff on public.stock_import_rows for all to authenticated using (public.is_staff()) with check (public.is_staff());
+
+grant select, insert, update, delete on public.clients, public.items, public.locations, public.stock_imports, public.stock_import_rows to authenticated;
+grant select on public.inventory, public.stock_moves to authenticated;
+grant usage, select on sequence public.items_id_seq, public.locations_id_seq to authenticated;
+
+-- Today in the UAE (expiry is judged by local date)
+create or replace function public.uae_today()
+returns date language sql stable as $$ select (now() at time zone 'Asia/Dubai')::date $$;
+
+-- Guess what a location is from its code (used when new locations arrive in a stock file)
+create or replace function public.guess_location_kind(p_code text)
+returns text language sql immutable as $$
+  select case
+    when upper(p_code) ~ 'DAMAGE|DMG' then 'damage'
+    when upper(p_code) ~ '^SHORT' then 'short'
+    when upper(p_code) ~ 'QUAR|QRT' then 'quarantine'
+    when upper(p_code) ~ '^OUT|DISPATCH|SHIP' then 'outbound'
+    when upper(p_code) ~ '^STAGE|^STG|^RECV|^REC-|INBOUND' then 'staging'
+    when upper(p_code) ~ '^DOCK' then 'dock'
+    else 'storage' end
+$$;
+
+-- Put expired stock on hold (for clients with that rule). Returns how many rows were held.
+create or replace function public.stock_hold_expired()
+returns integer language plpgsql security definer set search_path = public as $$
+declare n integer;
+begin
+  if public.my_role() is null then return 0; end if;
+  with h as (
+    update inventory i set status = 'hold', hold_reason = 'Expired', updated_at = now()
+      from clients c
+     where c.id = i.client_id and c.auto_hold_expired and i.status = 'ok' and i.expiry_date is not null and i.expiry_date < public.uae_today()
+    returning i.*)
+  insert into stock_moves (kind, client_id, item_id, inventory_id, from_loc, lpn, batch, expiry_date, qty, qty_before, qty_after, reason, user_id)
+  select 'hold', h.client_id, h.item_id, h.id, l.code, h.lpn, h.batch, h.expiry_date, h.qty, h.qty, h.qty, 'Expired (automatic)', auth.uid()
+    from h join locations l on l.id = h.location_id;
+  get diagnostics n = row_count;
+  return n;
+end $$;
+
+-- Apply a staged stock file: it replaces Stowra's stock for every client in the file.
+create or replace function public.stock_import_finish(p_import uuid)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare imp public.stock_imports; v_clients uuid[]; v_new_items int; v_new_locs int; v_rows int; v_qty numeric; v_changed int; v_held int; v_today date := public.uae_today();
+begin
+  if not public.is_staff() then raise exception 'Only supervisors can load stock files' using errcode = '42501'; end if;
+  select * into imp from stock_imports where id = p_import for update;
+  if not found then raise exception 'Import not found'; end if;
+  if imp.status <> 'staging' then raise exception 'This file has already been loaded'; end if;
+  if not exists (select 1 from stock_import_rows where import_id = p_import) then raise exception 'The file has no stock rows'; end if;
+
+  create temp table _r on commit drop as
+  select row_no,
+         upper(trim(coalesce(data ->> 'client', '')))  as client,
+         trim(coalesce(data ->> 'client_name', ''))     as client_name,
+         upper(trim(coalesce(data ->> 'sku', '')))     as sku,
+         trim(coalesce(data ->> 'descr', ''))          as descr,
+         upper(trim(coalesce(data ->> 'loc', '')))     as loc,
+         trim(coalesce(data ->> 'zone', ''))           as zone,
+         trim(coalesce(data ->> 'lpn', ''))            as lpn,
+         trim(coalesce(data ->> 'batch', ''))          as batch,
+         trim(coalesce(data ->> 'ref2', ''))           as ref2,
+         nullif(data ->> 'mfg', '')::date              as mfg,
+         nullif(data ->> 'exp', '')::date              as exp,
+         nullif(data ->> 'in_date', '')::timestamptz   as in_date,
+         coalesce(nullif(data ->> 'qty', '')::numeric, 0)    as qty,
+         coalesce(nullif(data ->> 'alloc', '')::numeric, 0)  as alloc,
+         coalesce(nullif(data ->> 'picked', '')::numeric, 0) as picked,
+         case when upper(coalesce(data ->> 'status', 'OK')) in ('HOLD', 'H', 'BLOCKED', 'QC') then 'hold' else 'ok' end as status,
+         trim(coalesce(data ->> 'asn', ''))            as asn,
+         trim(coalesce(data ->> 'ext_ref', ''))        as ext_ref,
+         greatest(coalesce(nullif(data ->> 'case_qty', '')::numeric, 1), 1) as case_qty,
+         coalesce(nullif(trim(data ->> 'uom'), ''), 'Each') as uom,
+         coalesce(nullif(trim(data ->> 'case_uom'), ''), 'Case') as case_uom,
+         trim(coalesce(data ->> 'group1', ''))         as group1,
+         trim(coalesce(data ->> 'group2', ''))         as group2,
+         coalesce(nullif(data ->> 'shelf_life', '')::int, 0) as shelf_life,
+         trim(coalesce(data ->> 'barcode', ''))        as barcode
+    from stock_import_rows where import_id = p_import;
+  if exists (select 1 from _r where client = '' or sku = '' or loc = '') then raise exception 'Every row needs a client, a SKU and a location'; end if;
+  if exists (select 1 from _r where qty < 0 or alloc < 0 or picked < 0) then raise exception 'Quantities can''t be negative'; end if;
+
+  -- clients
+  insert into clients (code, name)
+  select client, max(client_name) from _r group by client
+  on conflict (code) do update set name = case when excluded.name <> '' then excluded.name else clients.name end, updated_at = now();
+  select array_agg(id) into v_clients from clients where code in (select distinct client from _r);
+
+  -- items (new ones are added; descriptions and pack sizes are refreshed)
+  select count(*) into v_new_items from (select distinct client, sku from _r) x
+   where not exists (select 1 from items i join clients c on c.id = i.client_id where c.code = x.client and i.sku = x.sku);
+  insert into items (client_id, sku, description, base_uom, case_qty, case_uom, item_group, item_group2, shelf_life_days, barcode)
+  select distinct on (c.id, r.sku) c.id, r.sku, r.descr, r.uom, r.case_qty, r.case_uom, r.group1, r.group2, r.shelf_life, r.barcode
+    from _r r join clients c on c.code = r.client
+   order by c.id, r.sku, (r.barcode <> '') desc, r.row_no
+  on conflict (client_id, sku) do update set
+    description = case when excluded.description <> '' then excluded.description else items.description end,
+    case_qty = excluded.case_qty, base_uom = excluded.base_uom, case_uom = excluded.case_uom,
+    item_group = case when excluded.item_group <> '' then excluded.item_group else items.item_group end,
+    item_group2 = case when excluded.item_group2 <> '' then excluded.item_group2 else items.item_group2 end,
+    shelf_life_days = case when excluded.shelf_life_days > 0 then excluded.shelf_life_days else items.shelf_life_days end,
+    barcode = case when items.barcode = '' then excluded.barcode else items.barcode end,
+    updated_at = now();
+
+  -- locations (new ones are added with a guessed type; existing settings are kept)
+  select count(*) into v_new_locs from (select distinct loc from _r) x where not exists (select 1 from locations l where l.code = x.loc);
+  insert into locations (code, zone, kind, hold)
+  select loc, max(zone), public.guess_location_kind(loc), public.guess_location_kind(loc) in ('damage', 'short', 'quarantine') from _r group by loc
+  on conflict (code) do update set zone = case when locations.zone = '' then excluded.zone else locations.zone end;
+
+  -- totals before, per item
+  create temp table _before on commit drop as
+  select item_id, sum(qty) as qty from inventory where client_id = any (v_clients) group by item_id;
+
+  delete from inventory where client_id = any (v_clients);
+  insert into inventory (client_id, item_id, location_id, lpn, batch, ref2, mfg_date, expiry_date, received_at, asn, ext_ref, qty, allocated_qty, picked_qty, status, hold_reason, updated_by)
+  select c.id, i.id, l.id, r.lpn, r.batch, r.ref2, r.mfg, r.exp, r.in_date, r.asn, r.ext_ref, r.qty, least(r.alloc, r.qty), least(r.picked, r.qty),
+         case when r.status = 'hold' or l.hold then 'hold' else 'ok' end,
+         case when r.status = 'hold' then 'On hold in the WMS' when l.hold then 'In ' || l.code else '' end, auth.uid()
+    from _r r join clients c on c.code = r.client join items i on i.client_id = c.id and i.sku = r.sku join locations l on l.code = r.loc
+   where r.qty > 0;
+  get diagnostics v_rows = row_count;
+  select coalesce(sum(qty), 0) into v_qty from inventory where client_id = any (v_clients);
+
+  -- one history line per item whose total changed (refreshes only)
+  insert into stock_moves (kind, client_id, item_id, qty, qty_before, qty_after, reason, ref, user_id)
+  select 'import', it.client_id, it.id, coalesce(a.qty, 0) - coalesce(b.qty, 0), coalesce(b.qty, 0), coalesce(a.qty, 0), 'Stock file loaded', imp.file_name, auth.uid()
+    from items it
+    left join _before b on b.item_id = it.id
+    left join (select item_id, sum(qty) as qty from inventory where client_id = any (v_clients) group by item_id) a on a.item_id = it.id
+   where it.client_id = any (v_clients) and coalesce(a.qty, 0) <> coalesce(b.qty, 0)
+     -- the first load of a client is its opening stock: no history line per item
+     and it.client_id in (select distinct i2.client_id from _before b2 join items i2 on i2.id = b2.item_id);
+  get diagnostics v_changed = row_count;
+
+  v_held := public.stock_hold_expired();
+
+  update stock_imports set status = 'done', finished_at = now(), summary = jsonb_build_object(
+    'clients', (select jsonb_agg(code order by code) from clients where id = any (v_clients)),
+    'rows', v_rows, 'qty', v_qty, 'new_items', v_new_items, 'new_locations', v_new_locs, 'changed_items', v_changed, 'expired_held', v_held,
+    'hold_rows', (select count(*) from inventory where client_id = any (v_clients) and status = 'hold'))
+   where id = p_import returning summary into imp.summary;
+  delete from stock_import_rows where import_id = p_import;
+  return imp.summary;
+end $$;
+
+-- Stock with everything needed to show it (client, item, location, expiry state, available quantity)
+drop view if exists public.inventory_v;
+create view public.inventory_v with (security_invoker = true) as
+select i.*, c.code as client_code, c.name as client_name, c.batch_label, c.ref2_label, c.near_expiry_days,
+       it.sku, it.description, it.barcode, it.base_uom, it.case_qty, it.case_uom, it.item_group, it.item_group2, it.shelf_life_days,
+       l.code as location, l.zone, l.kind as location_kind, l.hold as location_hold,
+       case when i.expiry_date is null then null else i.expiry_date - public.uae_today() end as days_to_expiry,
+       case when i.expiry_date is null or it.shelf_life_days = 0 then null
+            else round(greatest(i.expiry_date - public.uae_today(), 0)::numeric / it.shelf_life_days * 100) end as life_left_pct,
+       case when i.expiry_date is null then 'none'
+            when i.expiry_date < public.uae_today() then 'expired'
+            when i.expiry_date - public.uae_today() <= c.near_expiry_days then 'near'
+            else 'ok' end as expiry_state,
+       case when i.status = 'ok' and not l.hold and not (c.auto_hold_expired and i.expiry_date is not null and i.expiry_date < public.uae_today())
+            then greatest(i.qty - i.allocated_qty - i.picked_qty, 0) else 0 end as available_qty,
+       p.full_name as updated_by_name
+from public.inventory i
+join public.clients c on c.id = i.client_id
+join public.items it on it.id = i.item_id
+join public.locations l on l.id = i.location_id
+left join public.profiles p on p.id = i.updated_by;
+grant select on public.inventory_v to authenticated;
+
+drop view if exists public.stock_move_list;
+create view public.stock_move_list with (security_invoker = true) as
+select m.*, c.code as client_code, it.sku, it.description, p.full_name as user_name
+from public.stock_moves m
+left join public.clients c on c.id = m.client_id
+left join public.items it on it.id = m.item_id
+left join public.profiles p on p.id = m.user_id;
+grant select on public.stock_move_list to authenticated;
+
+-- Item totals per client (stock overview)
+drop view if exists public.item_stock_v;
+create view public.item_stock_v with (security_invoker = true) as
+select it.id as item_id, it.client_id, c.code as client_code, it.sku, it.description, it.barcode, it.base_uom, it.case_qty, it.case_uom, it.item_group, it.item_group2, it.shelf_life_days, it.unit_cost, it.active,
+       coalesce(sum(v.qty), 0) as qty, coalesce(sum(v.allocated_qty), 0) as allocated_qty, coalesce(sum(v.picked_qty), 0) as picked_qty,
+       coalesce(sum(v.available_qty), 0) as available_qty,
+       coalesce(sum(v.qty) filter (where v.status = 'hold' or v.location_hold), 0) as hold_qty,
+       count(v.id) as stock_rows, count(distinct v.location_id) as locations, min(v.expiry_date) filter (where v.qty > 0) as first_expiry
+from public.items it
+join public.clients c on c.id = it.client_id
+left join public.inventory_v v on v.item_id = it.id
+group by it.id, c.code;
+grant select on public.item_stock_v to authenticated;
+
+-- Find stock by a scanned code: LPN, location, SKU or item barcode
+create or replace function public.stock_lookup(p_code text)
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare v text := upper(trim(coalesce(p_code, ''))); r jsonb; k text; lbl text;
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  if v = '' then return jsonb_build_object('kind', 'none', 'rows', '[]'::jsonb); end if;
+  if exists (select 1 from inventory where upper(lpn) = v) then k := 'lpn'; lbl := v;
+    select jsonb_agg(to_jsonb(x) order by x.location) into r from inventory_v x where upper(x.lpn) = v;
+  elsif exists (select 1 from locations where code = v) then k := 'location'; lbl := v;
+    select coalesce(jsonb_agg(to_jsonb(x) order by x.sku, x.expiry_date nulls last), '[]'::jsonb) into r from inventory_v x where x.location = v;
+  elsif exists (select 1 from items where sku = v or (barcode <> '' and upper(barcode) = v)) then k := 'item';
+    select string_agg(distinct sku, ', ') into lbl from items where sku = v or (barcode <> '' and upper(barcode) = v);
+    select coalesce(jsonb_agg(to_jsonb(x) order by x.expiry_date nulls last, x.location), '[]'::jsonb) into r from inventory_v x
+     where x.item_id in (select id from items where sku = v or (barcode <> '' and upper(barcode) = v));
+  else return jsonb_build_object('kind', 'none', 'label', v, 'rows', '[]'::jsonb);
+  end if;
+  return jsonb_build_object('kind', k, 'label', lbl, 'rows', coalesce(r, '[]'::jsonb),
+    'location', case when k = 'location' then (select to_jsonb(l) from locations l where code = v) end);
+end $$;
+
+-- Move a pallet, or part of it, to another location (operators and supervisors)
+create or replace function public.stock_move(p_inv bigint, p_to text, p_qty numeric default null, p_device text default null, p_client_id uuid default null, p_lpn text default null)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare s public.inventory; f public.locations; t public.locations; q numeric; free numeric; n public.inventory; v_status text; v_reason text; it public.items;
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  if p_client_id is not null and exists (select 1 from stock_moves where client_uuid = p_client_id) then
+    return (select jsonb_build_object('ok', true, 'repeat', true, 'inventory_id', inventory_id) from stock_moves where client_uuid = p_client_id);
+  end if;
+  select * into s from inventory where id = p_inv for update;
+  if not found then raise exception 'This stock is no longer there. Refresh and scan again.'; end if;
+  select * into f from locations where id = s.location_id;
+  select * into t from locations where code = upper(trim(coalesce(p_to, '')));
+  if not found then raise exception 'Location % doesn''t exist', upper(trim(coalesce(p_to, ''))); end if;
+  if not t.active then raise exception 'Location % is turned off', t.code; end if;
+  if t.id = s.location_id then raise exception 'The stock is already in %', t.code; end if;
+  q := coalesce(p_qty, s.qty);
+  if q <= 0 then raise exception 'Enter a quantity above 0'; end if;
+  free := s.qty - s.allocated_qty - s.picked_qty;
+  if q > free then raise exception 'Only % can be moved: % is allocated or picked for orders', free, s.allocated_qty + s.picked_qty; end if;
+  if not t.mixed_allowed and exists (select 1 from inventory x where x.location_id = t.id and x.item_id <> s.item_id and x.qty > 0) then
+    raise exception '% holds another SKU and doesn''t allow mixed stock', t.code;
+  end if;
+  v_status := case when t.hold then 'hold' else s.status end;
+  v_reason := case when t.hold and s.status = 'ok' then 'In ' || t.code else s.hold_reason end;
+  if q = s.qty then
+    update inventory set location_id = t.id, status = v_status, hold_reason = v_reason, lpn = coalesce(nullif(trim(p_lpn), ''), lpn), updated_at = now(), updated_by = auth.uid()
+     where id = s.id returning * into n;
+  else
+    update inventory set qty = qty - q, updated_at = now(), updated_by = auth.uid() where id = s.id;
+    insert into inventory (client_id, item_id, location_id, lpn, batch, ref2, mfg_date, expiry_date, received_at, asn, ext_ref, qty, status, hold_reason, updated_by)
+    values (s.client_id, s.item_id, t.id, coalesce(nullif(trim(p_lpn), ''), ''), s.batch, s.ref2, s.mfg_date, s.expiry_date, s.received_at, s.asn, s.ext_ref, q, v_status, v_reason, auth.uid())
+    returning * into n;
+  end if;
+  insert into stock_moves (kind, client_id, item_id, inventory_id, from_loc, to_loc, lpn, batch, expiry_date, qty, qty_before, qty_after, note, device, client_uuid, user_id)
+  values ('move', s.client_id, s.item_id, n.id, f.code, t.code, coalesce(nullif(n.lpn, ''), s.lpn), s.batch, s.expiry_date, q, s.qty, s.qty - q,
+          case when q < s.qty then 'Part of the pallet' else '' end || case when t.hold and s.status = 'ok' then ' Put on hold (' || t.kind || ' location)' else '' end, p_device, p_client_id, auth.uid());
+  return jsonb_build_object('ok', true, 'inventory_id', n.id, 'to', t.code, 'qty', q, 'status', n.status);
+end $$;
+
+-- Hold or release stock (supervisors). A reason is required.
+create or replace function public.stock_set_status(p_ids bigint[], p_status text, p_reason text)
+returns integer language plpgsql security definer set search_path = public as $$
+declare r record; n integer := 0;
+begin
+  if not public.is_staff() then raise exception 'Only supervisors can hold or release stock' using errcode = '42501'; end if;
+  if p_status not in ('ok', 'hold') then raise exception 'Unknown status'; end if;
+  if nullif(trim(coalesce(p_reason, '')), '') is null then raise exception 'Enter a reason'; end if;
+  for r in select i.*, l.code as loc, l.hold as loc_hold, l.kind as loc_kind, c.auto_hold_expired from inventory i join locations l on l.id = i.location_id join clients c on c.id = i.client_id
+            where i.id = any (p_ids) for update of i loop
+    if r.status = p_status then continue; end if;
+    if p_status = 'ok' and r.loc_hold then raise exception 'Stock in % (% location) can''t be released. Move it to a normal location first.', r.loc, r.loc_kind; end if;
+    if p_status = 'ok' and r.auto_hold_expired and r.expiry_date is not null and r.expiry_date < public.uae_today() then
+      raise exception 'Expired stock can''t be released (% in %, expired %)', coalesce(nullif(r.batch, ''), 'no batch'), r.loc, to_char(r.expiry_date, 'DD Mon YYYY');
+    end if;
+    update inventory set status = p_status, hold_reason = case when p_status = 'hold' then trim(p_reason) else '' end, updated_at = now(), updated_by = auth.uid() where id = r.id;
+    insert into stock_moves (kind, client_id, item_id, inventory_id, from_loc, lpn, batch, expiry_date, qty, qty_before, qty_after, reason, user_id)
+    values (case when p_status = 'hold' then 'hold' else 'release' end, r.client_id, r.item_id, r.id, r.loc, r.lpn, r.batch, r.expiry_date, r.qty, r.qty, r.qty, trim(p_reason), auth.uid());
+    n := n + 1;
+  end loop;
+  return n;
+end $$;
+
+-- Adjust a stock quantity, or add stock found in a location (supervisors). A reason is required.
+-- p: { inventory_id, qty (new quantity), reason, note }  or, to add:  { client, sku, location, lpn, batch, mfg_date, expiry_date, qty, reason, note }
+create or replace function public.stock_adjust(p jsonb)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare s public.inventory; c public.clients; it public.items; l public.locations; v_new numeric := (p ->> 'qty')::numeric; v_reason text := trim(coalesce(p ->> 'reason', '')); n public.inventory;
+begin
+  if not public.is_staff() then raise exception 'Only supervisors can adjust stock' using errcode = '42501'; end if;
+  if v_reason = '' then raise exception 'Choose a reason'; end if;
+  if v_new is null or v_new < 0 then raise exception 'Enter the new quantity (0 or more)'; end if;
+  if nullif(p ->> 'inventory_id', '') is not null then
+    select * into s from inventory where id = (p ->> 'inventory_id')::bigint for update;
+    if not found then raise exception 'This stock is no longer there. Refresh the page.'; end if;
+    if v_new = s.qty then raise exception 'The quantity is unchanged'; end if;
+    if v_new < s.allocated_qty + s.picked_qty then raise exception 'At least % is allocated or picked for orders', s.allocated_qty + s.picked_qty; end if;
+    select * into l from locations where id = s.location_id;
+    if v_new = 0 then delete from inventory where id = s.id;
+    else update inventory set qty = v_new, updated_at = now(), updated_by = auth.uid() where id = s.id; end if;
+    insert into stock_moves (kind, client_id, item_id, inventory_id, from_loc, lpn, batch, expiry_date, qty, qty_before, qty_after, reason, note, user_id)
+    values ('adjust', s.client_id, s.item_id, s.id, l.code, s.lpn, s.batch, s.expiry_date, v_new - s.qty, s.qty, v_new, v_reason, trim(coalesce(p ->> 'note', '')), auth.uid());
+    return jsonb_build_object('ok', true, 'inventory_id', s.id, 'qty', v_new);
+  end if;
+  -- found stock
+  select * into c from clients where code = upper(trim(coalesce(p ->> 'client', '')));
+  if not found then raise exception 'Choose the client'; end if;
+  select * into it from items where client_id = c.id and sku = upper(trim(coalesce(p ->> 'sku', '')));
+  if not found then raise exception 'SKU % isn''t in the item master for %', upper(trim(coalesce(p ->> 'sku', ''))), c.code; end if;
+  select * into l from locations where code = upper(trim(coalesce(p ->> 'location', '')));
+  if not found then raise exception 'Location % doesn''t exist', upper(trim(coalesce(p ->> 'location', ''))); end if;
+  if v_new <= 0 then raise exception 'Enter a quantity above 0'; end if;
+  if c.track_batch = 'required' and nullif(trim(coalesce(p ->> 'batch', '')), '') is null then raise exception '% is required for %', c.batch_label, c.code; end if;
+  if c.track_expiry = 'required' and nullif(p ->> 'expiry_date', '') is null then raise exception 'The expiry date is required for %', c.code; end if;
+  insert into inventory (client_id, item_id, location_id, lpn, batch, mfg_date, expiry_date, received_at, qty, status, hold_reason, updated_by)
+  values (c.id, it.id, l.id, trim(coalesce(p ->> 'lpn', '')), trim(coalesce(p ->> 'batch', '')), nullif(p ->> 'mfg_date', '')::date, nullif(p ->> 'expiry_date', '')::date, now(), v_new,
+          case when l.hold then 'hold' else 'ok' end, case when l.hold then 'In ' || l.code else '' end, auth.uid())
+  returning * into n;
+  insert into stock_moves (kind, client_id, item_id, inventory_id, to_loc, lpn, batch, expiry_date, qty, qty_before, qty_after, reason, note, user_id)
+  values ('adjust', c.id, it.id, n.id, l.code, n.lpn, n.batch, n.expiry_date, v_new, 0, v_new, v_reason, trim(coalesce(p ->> 'note', '')), auth.uid());
+  return jsonb_build_object('ok', true, 'inventory_id', n.id, 'qty', v_new);
+end $$;
+
+revoke all on function public.stock_hold_expired(), public.stock_import_finish(uuid), public.stock_lookup(text), public.stock_move(bigint, text, numeric, text, uuid, text),
+  public.stock_set_status(bigint[], text, text), public.stock_adjust(jsonb) from public, anon;
+grant execute on function public.stock_hold_expired(), public.stock_import_finish(uuid), public.stock_lookup(text), public.stock_move(bigint, text, numeric, text, uuid, text),
+  public.stock_set_status(bigint[], text, text), public.stock_adjust(jsonb), public.uae_today(), public.guess_location_kind(text) to authenticated;
+
+-- Totals for the stock page (all clients, or one client code)
+create or replace function public.stock_summary(p_client text default null)
+returns jsonb language sql stable security definer set search_path = public as $$
+  select case when public.my_role() is null then null else jsonb_build_object(
+    'rows', count(*), 'qty', coalesce(sum(qty), 0), 'available', coalesce(sum(available_qty), 0),
+    'allocated', coalesce(sum(allocated_qty), 0), 'picked', coalesce(sum(picked_qty), 0),
+    'hold_qty', coalesce(sum(qty) filter (where status = 'hold' or location_hold), 0), 'hold_rows', count(*) filter (where status = 'hold' or location_hold),
+    'expired_rows', count(*) filter (where expiry_state = 'expired'), 'expired_qty', coalesce(sum(qty) filter (where expiry_state = 'expired'), 0),
+    'near_rows', count(*) filter (where expiry_state = 'near'), 'near_qty', coalesce(sum(qty) filter (where expiry_state = 'near'), 0),
+    'items', count(distinct item_id), 'locations', count(distinct location_id), 'clients', count(distinct client_id)) end
+  from public.inventory_v where p_client is null or p_client = '' or client_code = upper(p_client)
+$$;
+revoke all on function public.stock_summary(text) from public, anon;
+grant execute on function public.stock_summary(text) to authenticated;

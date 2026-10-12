@@ -153,6 +153,27 @@ The APK from Part 4 is a *debug* build. It's fine for testing and for installing
    - **Start at label position** lets you reuse a partly used label sheet.
    - If a code can't be encoded in the chosen barcode type (for example letters in EAN-13), or the bars would be too thin to scan, the console lists it before printing.
 
+## Version 7: stock (clients, items, locations, pallets)
+
+**Do this once:** run the new `supabase/schema.sql` in the Supabase SQL Editor (clear, paste the whole file, Run, confirm the warning). Existing data is kept.
+
+**Load your stock (console > Stock > Load stock file):** choose your WMS stock report (Excel or CSV, one row per pallet or per location and batch). Infor-style reports (STORERKEY, SKU, LOC, ID, LOT, BATCH, EXP_DATE, SYSTEM_QTY, STATUS…) are recognised automatically; for other reports, pick the columns once on screen. For every client in the file, Stowra's stock is **replaced** by the file, so load it again whenever you want to refresh. New clients, items and locations are created automatically. "NA" in batch or lot columns is treated as empty.
+
+**What you get**
+- **Stock:** every pallet with location, LPN, batch, expiry (days left and % shelf life left), quantity in units and cases, allocated/picked, available, and status. Filter by client, on hold, expired, near expiry or allocated; switch to **By item** for totals. Export to Excel.
+- **Item page:** totals, every pallet (first to expire first) and the item's full history.
+- **Actions (supervisors):** move, adjust quantity (with a reason), put on hold or release (with a reason), add found stock. Expired stock, and stock in damage, short or quarantine locations, can't be released.
+- **Stock history:** every move, hold, release, adjustment and file change, with who and when. It can't be edited.
+- **Phone, Stock tab (everyone except security):** scan a location, pallet label, SKU or barcode to see the stock; tap a line to move it by scanning the new location.
+- **Clients:** rules per client: batch / expiry / mfg date not tracked, optional or required; what the batch field means (for example "Container no."); FEFO or FIFO; near-expiry warning days; minimum shelf life to receive and to dispatch; expired stock on hold automatically. Receiving and picking (next steps) use these rules.
+- **Item master** and **Locations:** correct descriptions, barcodes, units per case, shelf life; set location types (storage, staging, outbound, damage, short, quarantine), one-SKU-only locations, turn locations off, add locations one by one or as a range.
+
+**Rules already applied**
+- Expired stock goes on hold automatically (per client setting) when the file is loaded and when the Stock page opens.
+- Stock in damage, short and quarantine locations is always on hold; moving stock there puts it on hold.
+- Allocated or picked quantity can't be moved or adjusted below what orders need.
+- The first load of a client is its opening stock; later loads record, per item, how the total changed.
+
 ## Version 6: vehicle checklists
 
 **Do this once:** run the new `supabase/schema.sql` in the Supabase SQL Editor (clear, paste the whole file, Run, confirm the warning). Existing data is kept. Four starter checklists are added: inbound before unloading, inbound before dock out, outbound before loading, outbound before dock out.

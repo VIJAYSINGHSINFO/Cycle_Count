@@ -78,13 +78,20 @@ function renderShell() {
     <nav class="side" aria-label="Main">
       <div class="brand">${MARK_NAVY}<span class="wordmark">stowra</span></div>
       <div class="orgname" id="orgname"></div>
+      <div class="navh">Stock</div>
+      <a href="#/stock" data-nav="stock">Stock</a>
+      <a href="#/skus" data-nav="skus">Item master</a>
+      <a href="#/locations" data-nav="locations">Locations</a>
+      <a href="#/clients" data-nav="clients">Clients</a>
+      <div class="navh">Checks</div>
       <a href="#/counts" data-nav="counts">Counts</a>
       <a href="#/history" data-nav="history">Reconciliation history</a>
       <a href="#/items" data-nav="items">Item history</a>
-      <a href="#/gate" data-nav="gate">Gate and yard</a>
       <a href="#/qc" data-nav="qc">Order QC</a>
+      <div class="navh">Yard</div>
+      <a href="#/gate" data-nav="gate">Gate and yard</a>
       <a href="#/labels" data-nav="labels">Barcode labels</a>
-      ${S.me.role === "admin" ? `<a href="#/checklists" data-nav="checklists">Checklists</a><a href="#/users" data-nav="users">Users</a><a href="#/settings" data-nav="settings">Settings</a>` : ""}
+      ${S.me.role === "admin" ? `<div class="navh">Admin</div><a href="#/checklists" data-nav="checklists">Checklists</a><a href="#/users" data-nav="users">Users</a><a href="#/settings" data-nav="settings">Settings</a>` : ""}
       <div class="me">${esc(S.me.full_name)}<br><span style="opacity:.7">${S.me.role === "admin" ? "Administrator" : "Supervisor"}</span><br><button data-act="signout">Sign out</button></div>
     </nav>
     <main class="main" id="main"></main></div>`;
@@ -98,8 +105,10 @@ function onRoute() {
   stopTimer();
   const [page, id, tab] = route();
   $$(".side a").forEach(a => a.setAttribute("aria-current", a.dataset.nav === page ? "page" : "false"));
+  window.scrollTo(0, 0);
   const m = $("#main"); m.innerHTML = `<div class="loading">Loading…</div>`;
-  ({counts: pageCounts, count: () => pageCount(id, tab || "overview"), history: pageHistory, items: pageItems, labels: () => window.CCLabels.page($("#main"), {sb, q, toast, parseDelimited}), qc: () => window.CCQc.page($("#main"), qcCtx(), id), gate: () => window.CCGate.page($("#main"), qcCtx(), id), settings: () => window.CCGate.page($("#main"), qcCtx(), null, "settings"), checklists: () => window.CCChecklists.page($("#main"), qcCtx(), id), users: pageUsers}[page] || pageCounts)();
+  ({counts: pageCounts, count: () => pageCount(id, tab || "overview"), history: pageHistory, items: pageItems, labels: () => window.CCLabels.page($("#main"), {sb, q, toast, parseDelimited}), qc: () => window.CCQc.page($("#main"), qcCtx(), id), gate: () => window.CCGate.page($("#main"), qcCtx(), id), settings: () => window.CCGate.page($("#main"), qcCtx(), null, "settings"), checklists: () => window.CCChecklists.page($("#main"), qcCtx(), id), users: pageUsers,
+    stock: () => window.CCStock.page($("#main"), qcCtx(), id, tab), clients: () => window.CCStock.page($("#main"), qcCtx(), "clients", id), skus: () => window.CCStock.page($("#main"), qcCtx(), "skus"), locations: () => window.CCStock.page($("#main"), qcCtx(), "locations")}[page] || pageCounts)();
 }
 
 const QC_CACHE = {};

@@ -85,18 +85,19 @@ function renderSync() { const s = $("#sync"); if (!s) return; s.outerHTML = sync
 function allowedModes() {
   const staff = M.me && ["admin", "supervisor"].includes(M.me.role);
   if (M.me && M.me.job === "security" && !staff) return ["gate"];
-  return staff ? ["count", "qc", "dock", "gate"] : ["count", "qc", "dock"];
+  return staff ? ["count", "qc", "stock", "dock", "gate"] : ["count", "qc", "stock", "dock"];
 }
 function modeTabs(active) {
-  const L = {count: "Count", qc: "Order QC", dock: "Docks", gate: "Gate"}, list = allowedModes();
+  const L = {count: "Count", qc: "Order QC", stock: "Stock", dock: "Docks", gate: "Gate"}, list = allowedModes();
   if (list.length < 2) return "";
-  return `<div class="modes" style="grid-template-columns:repeat(${list.length},1fr)" role="tablist" aria-label="What are you doing?">${list.map(k => `<button role="tab" aria-selected="${active === k}" data-act="mode" data-m="${k}">${L[k]}</button>`).join("")}</div>`;
+  return `<div class="modes${list.length > 3 ? " many" : ""}" style="grid-template-columns:repeat(${list.length},1fr)" role="tablist" aria-label="What are you doing?">${list.map(k => `<button role="tab" aria-selected="${active === k}" data-act="mode" data-m="${k}">${L[k]}</button>`).join("")}</div>`;
 }
 async function renderSessions() {
   leaveSession();
   if (!allowedModes().includes(M.mode)) M.mode = allowedModes()[0];
   if ((M.mode === "gate" || M.mode === "dock") && window.CCGate) return window.CCGate.home(M.mode);
   if (M.mode === "qc" && window.CCQC) return window.CCQC.home();
+  if (M.mode === "stock" && window.CCStockM) return window.CCStockM.home();
   $("#root").innerHTML = topbar("Choose a count", "", `<button data-act="signout">Sign out</button>`) + `<div class="wrap">${modeTabs("count")}<p class="small muted">Signed in as ${esc(M.me.full_name)}</p><div class="sess" id="sess"><div class="loading">Loading counts…</div></div></div>`;
   let rows = null;
   try { const r = await sb.rpc("mobile_sessions"); if (r.error) throw r.error; rows = r.data; idb.set("sessions", rows); } catch { rows = await idb.get("sessions").catch(() => null); if (rows) toast("Offline: showing saved counts"); }
@@ -171,7 +172,7 @@ async function openSession(id) {
   joinPresence();
   M.timers.push(setInterval(pull, 15000), setInterval(checkOpen, 60000));
 }
-function leaveSession() { M.timers.forEach(clearInterval); M.timers = []; try { window.CCGate && window.CCGate.stop(); window.CCQC && window.CCQC.stop(); } catch {} if (M.channel) { try { sb.removeChannel(M.channel); } catch {} M.channel = null; } }
+function leaveSession() { M.timers.forEach(clearInterval); M.timers = []; try { window.CCGate && window.CCGate.stop(); window.CCQC && window.CCQC.stop(); window.CCStockM && window.CCStockM.stop(); } catch {} if (M.channel) { try { sb.removeChannel(M.channel); } catch {} M.channel = null; } }
 async function pull() {
   if (!isOnline() || !M.sess) return;
   try { await fetchPages(M.maxUpdated, rows => applyRows(rows)); saveCache(); refreshWalk(); } catch {}
@@ -648,7 +649,7 @@ setInterval(flush, 5000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { flush(); pull(); } });
 
 /* ---------- camera scanning ---------- */
-function dispatchScan(v) { if (!v) return; if ((M.mode === "gate" || M.mode === "dock") && window.CCGate) window.CCGate.scan(v); else if (M.mode === "qc" && window.CCQC) window.CCQC.scan(v); else handleScan(v); }
+function dispatchScan(v) { if (!v) return; if ((M.mode === "gate" || M.mode === "dock") && window.CCGate) window.CCGate.scan(v); else if (M.mode === "qc" && window.CCQC) window.CCQC.scan(v); else if (M.mode === "stock" && window.CCStockM) window.CCStockM.scan(v); else handleScan(v); }
 function nativeScanner() { const c = window.Capacitor; return c && c.isNativePlatform && c.isNativePlatform() && c.Plugins && c.Plugins.BarcodeScanner ? c.Plugins.BarcodeScanner : null; }
 const cameraAvailable = () => !!nativeScanner() || "BarcodeDetector" in window;
 async function cameraScan() {
@@ -692,7 +693,7 @@ document.addEventListener("click", async e => {
     case "to-signup": renderLogin("up"); break;
     case "to-signin": renderLogin("in"); break;
     case "reload-sessions": renderSessions(); break;
-    case "mode": M.mode = ["qc", "gate", "dock"].includes(b.dataset.m) ? b.dataset.m : "count"; ls.set("cc-mode", M.mode); renderSessions(); break;
+    case "mode": M.mode = ["qc", "gate", "dock", "stock"].includes(b.dataset.m) ? b.dataset.m : "count"; ls.set("cc-mode", M.mode); renderSessions(); break;
     case "open": openSession(b.dataset.id).then(showFailed); break;
     case "back": renderSessions(); break;
     case "goto": newVisit(+b.dataset.li, false); renderStage(); announce(); break;
@@ -730,6 +731,7 @@ if (CONFIG.DEMO) {   // hooks for the preview page's test barcodes
   window.__demoScan = v => dispatchScan(v);
   window.__demoState = () => ({phase: M.phase, loc: M.sess && M.locs[M.cur] ? M.locs[M.cur].loc : null, rack: M.sess && M.locs[M.cur] ? M.locs[M.cur].rack : null, session: M.sess ? M.sess.id : null});
 }
+if (window.CCStockM) window.CCStockM.init({sb, M, esc, fmt, uuid, ls, toast, vibrate, isOnline, DEVICE, topbar, modeTabs, leaveSession, cameraAvailable, CAM_ICON});
 if (window.CCGate) window.CCGate.init({sb, M, esc, fmt, uuid, ls, toast, vibrate, isOnline, DEVICE, topbar, modeTabs, leaveSession, cameraAvailable, CAM_ICON});
 if (window.CCQC) window.CCQC.init({sb, M, esc, fmt, uuid, ls, idb, toast, vibrate, isOnline, isServerError, DEVICE, topbar, modeTabs, leaveSession, queue, flushNow, confirmTwice, cameraAvailable, CAM_ICON});
 if ("serviceWorker" in navigator && platform === "web" && !CONFIG.DEMO) navigator.serviceWorker.register("sw.js").catch(() => {});

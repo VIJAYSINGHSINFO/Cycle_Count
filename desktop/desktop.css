@@ -146,3 +146,11 @@ tr.off td{opacity:.55}
 .ckn{font:700 1.1rem/1 var(--cond);color:var(--muted);width:22px}
 .ckopts{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin:8px 0 0 28px}
 .ckopts .mini{min-width:0;width:80px;padding:5px 8px}
+/* Stock pages */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.grid2>*{min-width:0}
+@media (max-width:640px){.grid2{grid-template-columns:1fr}}
+dialog#stdlg{max-width:620px;width:calc(100% - 32px)}
+.toolbar>.chips{flex-wrap:wrap}
+.side .navh{font-size:.68rem;letter-spacing:.09em;text-transform:uppercase;opacity:.55;margin:12px 12px 2px}
+.side{overflow-y:auto}
