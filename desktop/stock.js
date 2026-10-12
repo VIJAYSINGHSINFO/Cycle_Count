@@ -494,7 +494,7 @@ async function pageSkus(main) {
   C.cache.skuRows = rows;
   main.innerHTML = `
     <div class="pagehead"><div><h1>Item master</h1><p class="muted small" style="margin:4px 0 0">Every SKU per client, with barcode, units and shelf life. Items arrive with stock files; add or correct them here.</p></div>
-      <div class="row"><button class="btn" data-sa="export-skus" ${total ? "" : "disabled"}>Export to Excel</button><button class="btn go" data-sa="sku-new" ${clientsCache.length ? "" : "disabled"}>Add item</button></div></div>
+      <div class="row"><button class="btn" data-sa="export-skus">Export to Excel</button><button class="btn" data-sa="sku-upload">Upload from Excel</button><button class="btn go" data-sa="sku-new" ${clientsCache.length ? "" : "disabled"}>Add item</button></div></div>
     <div class="toolbar" style="gap:8px;justify-content:flex-start">${clientSelect("skclient", V.client)}<input class="search" id="sksearch" placeholder="Search SKU, description, barcode or group" value="${esc(V.iq)}"></div>
     ${rows.length ? `<div class="tablewrap"><table><thead><tr><th>Client</th><th>SKU</th><th>Description</th><th>Barcode</th><th>Unit</th><th class="n">Per case</th><th>Group</th><th class="n">Shelf life</th><th class="n">In stock</th><th>Active</th><th></th></tr></thead><tbody>
       ${rows.map(v => `<tr><td>${esc(v.client_code)}</td><td><a href="#/stock/item/${esc(v.item_id)}"><strong>${esc(v.sku)}</strong></a></td><td class="desc">${esc(v.description)}</td><td class="small">${esc(v.barcode || "–")}</td><td>${esc(v.base_uom)}</td><td class="n">${C.fmt(v.case_qty)}</td>
@@ -543,7 +543,7 @@ async function pageLocations(main) {
   C.cache.locRows = rows; C.cache.sites = sites;
   main.innerHTML = `
     <div class="pagehead"><div><h1>Locations</h1><p class="muted small" style="margin:4px 0 0">Storage, staging, outbound and hold locations. Stock in damage, short and quarantine locations is always on hold. New locations from stock files get a type guessed from the code; check them here.</p></div>
-      <div class="row"><button class="btn" data-sa="export-locs" ${total ? "" : "disabled"}>Export to Excel</button><button class="btn go" data-sa="loc-new">Add locations</button></div></div>
+      <div class="row"><button class="btn" data-sa="export-locs">Export to Excel</button><button class="btn" data-sa="loc-upload">Upload from Excel</button><button class="btn go" data-sa="loc-new">Add locations</button></div></div>
     <div class="toolbar" style="flex-wrap:wrap;gap:8px;justify-content:flex-start"><div class="chips">${[["all", "All"], ...Object.entries(KIND).filter(([k]) => k !== "pick"), ["off", "Turned off"]].map(([k, l]) => `<button class="chip" aria-pressed="${V.lk === k}" data-sa="lfilter" data-f="${k}">${l}</button>`).join("")}</div>
       <input class="search" id="lcsearch" placeholder="Search code or zone" value="${esc(V.lq)}"></div>
     ${V.lsel.size ? `<div class="banner"><span>${V.lsel.size} selected</span><span class="row"><select id="lbulk" class="search" style="max-width:200px"><option value="">Change type to…</option>${Object.entries(KIND).map(([k, l]) => `<option value="${k}">${l}</option>`).join("")}</select><button class="btn sm" data-sa="loc-off">Turn off</button><button class="btn sm" data-sa="loc-on">Turn on</button><button class="btn sm ghost" data-sa="lclear">Clear</button></span></div>` : ""}
@@ -593,6 +593,86 @@ function newLocDialog() {
     C.toast(`${add.length} location${add.length === 1 ? "" : "s"} added${existing.length ? `, ${existing.length} already existed` : ""}`); pageLocations($("#main"));
   });
 }
+/* ---------- upload locations or items from Excel (new rows are added, existing ones updated) ---------- */
+const yes = v => /^(y|yes|true|1|on hold|hold|on)$/i.test(String(v).trim()), no = v => /^(n|no|false|0|available|off|one sku only|single)$/i.test(String(v).trim());
+const guessKind = c => { c = String(c).toUpperCase(); return /DAMAGE|DMG/.test(c) ? "damage" : /^SHORT/.test(c) ? "short" : /QUAR|QRT/.test(c) ? "quarantine" : /^OUT|DISPATCH|SHIP/.test(c) ? "outbound" : /^STAGE|^STG|^RECV|^REC-|INBOUND/.test(c) ? "staging" : /^DOCK/.test(c) ? "dock" : "storage"; };
+const kindOf = v => { const t = String(v || "").trim().toLowerCase(); if (!t) return ""; const k = Object.entries(KIND).find(([key, l]) => key === t || l.toLowerCase() === t || l.toLowerCase().startsWith(t)); return k ? k[0] : "?"; };
+const LOC_COLS = [["Code", ["CODE", "LOCATION", "LOC", "LOCATION CODE", "BIN"], true], ["Zone", ["ZONE", "AREA", "PUTAWAYZONE"]], ["Type", ["TYPE", "KIND", "LOCATION TYPE"]], ["Stock is", ["STOCK IS", "HOLD", "ON HOLD", "STATUS"]], ["Mixed SKUs", ["MIXED SKUS", "MIXED", "MIXED ALLOWED"]], ["Active", ["ACTIVE", "ENABLED"]], ["Notes", ["NOTES", "REMARKS", "COMMENT"]]];
+const SKU_COLS = [["Client", ["CLIENT", "STORER", "STORERKEY", "STORER KEY", "OWNER", "CLIENT CODE"], true], ["SKU", ["SKU", "ITEM", "ITEM CODE", "PRODUCT CODE", "MATERIAL"], true], ["Description", ["DESCRIPTION", "DESCR", "ITEM DESCRIPTION", "PRODUCT NAME"]], ["Barcode", ["BARCODE", "EAN", "UPC", "GTIN"]],
+  ["Base unit", ["BASE UNIT", "UOM", "BASE UOM", "UNIT"]], ["Units per case", ["UNITS PER CASE", "CASE QTY", "CASECNT", "PACK SIZE"]], ["Case unit", ["CASE UNIT", "CASE UOM"]], ["Item group", ["ITEM GROUP", "ITEM_GROUP", "CATEGORY"]], ["Item group 2", ["ITEM GROUP 2", "ITEM GROUP2", "ITEM_GROUP2"]],
+  ["Shelf life (days)", ["SHELF LIFE (DAYS)", "SHELF LIFE", "TOTAL SHELF LIFE", "SHELF LIFE DAYS"]], ["Unit cost", ["UNIT COST", "COST"]], ["In stock", []], ["Active", ["ACTIVE"]]];
+const colMap = (header, cols) => { const H = header.map(h => normH(String(h).replace(/[()]/g, ""))); const m = {}; cols.forEach(([name, alts]) => { m[name] = H.findIndex(h => [name, ...alts].map(x => normH(x.replace(/[()]/g, ""))).includes(h)); }); return m; };
+async function fetchIn(table, col, values, extra) { const out = []; for (let i = 0; i < values.length; i += 150) { let qq = C.sb.from(table).select("*").in(col, values.slice(i, i + 150)); if (extra) qq = extra(qq); out.push(...await C.q(qq)); } return out; }
+const LOC_UP = {
+  title: "Upload locations from Excel", cols: LOC_COLS, name: "Stowra_locations_template.xlsx",
+  sample: [["W2C2C0101A", "W2C2C", "Storage", "Available", "Allowed", "Yes", ""], ["DAMAGE", "", "Damage", "On hold", "Allowed", "Yes", "Damaged goods"], ["STAGE-WA05", "", "Staging", "Available", "Allowed", "Yes", ""]],
+  help: "One row per location. Only <strong>Code</strong> is required. Type: Storage, Pick face, Staging, Outbound, Dock, Damage, Short or Quarantine (left empty: guessed from the code). Stock is: Available or On hold. Mixed SKUs: Allowed or One SKU only. Active: Yes or No. Existing locations are updated; empty cells keep what is there now.",
+  async prepare(table) {
+    const m = colMap(table[0], LOC_COLS); if (m.Code < 0) throw new Error("The file needs a Code (or Location) column.");
+    const g = (r, k) => m[k] >= 0 ? String(r[m[k]] ?? "").trim() : "";
+    const seen = new Map(), bad = [];
+    table.slice(1).forEach((r, i) => { const code = g(r, "Code").toUpperCase(); if (!code) return; const k = kindOf(g(r, "Type")); if (k === "?") { bad.push(`Row ${i + 2}: type "${g(r, "Type")}" not recognised`); return; } seen.set(code, {r, k}); });
+    const codes = [...seen.keys()]; if (!codes.length) throw new Error("No location codes found in the file.");
+    const ex = new Map((await fetchIn("locations", "code", codes)).map(l => [l.code, l]));
+    const rows = codes.map(code => { const {r, k} = seen.get(code), e = ex.get(code), kind = k || (e ? e.kind : guessKind(code)), hs = g(r, "Stock is"), mx = g(r, "Mixed SKUs"), ac = g(r, "Active");
+      return {code, zone: g(r, "Zone") || (e ? e.zone : ""), kind, hold: ["damage", "short", "quarantine"].includes(kind) || (hs ? yes(hs) : e ? e.hold : false),
+        mixed_allowed: mx ? !no(mx) : e ? e.mixed_allowed : true, active: ac ? !no(ac) : e ? e.active : true, notes: g(r, "Notes") || (e ? e.notes : "")}; });
+    return {rows, added: rows.filter(r => !ex.has(r.code)).length, updated: rows.filter(r => ex.has(r.code)).length, bad};
+  },
+  async apply(p) { for (let i = 0; i < p.rows.length; i += 500) await C.q(C.sb.from("locations").upsert(p.rows.slice(i, i + 500), {onConflict: "code"})); },
+  done: () => pageLocations($("#main"))
+};
+const SKU_UP = {
+  title: "Upload items from Excel", cols: SKU_COLS.filter(c => c[0] !== "In stock"), name: "Stowra_items_template.xlsx",
+  sample: [["TGD", "7015687", "Data Strip Fragrance 540mm Clear", "9315340505766", "Each", 100, "Case", "STD", "", 730, 0, "Yes"]],
+  help: "One row per item. <strong>Client</strong> (code) and <strong>SKU</strong> are required. Existing items are updated; empty cells keep what is there now. Clients that don't exist yet are created.",
+  async prepare(table) {
+    const m = colMap(table[0], SKU_COLS); if (m.Client < 0 || m.SKU < 0) throw new Error("The file needs Client and SKU columns.");
+    const g = (r, k) => m[k] >= 0 ? String(r[m[k]] ?? "").trim() : "";
+    const seen = new Map(), bad = [];
+    table.slice(1).forEach((r, i) => { const c = g(r, "Client").toUpperCase(), sku = g(r, "SKU").toUpperCase(); if (!c && !sku) return; if (!c || !sku) { bad.push(`Row ${i + 2}: client or SKU missing`); return; } seen.set(c + "|" + sku, {r, c, sku}); });
+    if (!seen.size) throw new Error("No items found in the file.");
+    await clients(true);
+    const newClients = [...new Set([...seen.values()].map(x => x.c))].filter(c => !clientsCache.some(k => k.code === c));
+    const ex = new Map();
+    for (const cl of clientsCache) { const skus = [...seen.values()].filter(x => x.c === cl.code).map(x => x.sku); if (skus.length) (await fetchIn("items", "sku", skus, qq => qq.eq("client_id", cl.id))).forEach(i => ex.set(cl.code + "|" + i.sku, i)); }
+    const num = (v, d) => { const n = Number(String(v).replace(/,/g, "")); return v === "" || isNaN(n) ? d : n; };
+    const rows = [...seen.values()].map(({r, c, sku}) => { const e = ex.get(c + "|" + sku) || {}, ac = g(r, "Active");
+      return {_client: c, sku, description: g(r, "Description") || e.description || "", barcode: g(r, "Barcode") || e.barcode || "", base_uom: g(r, "Base unit") || e.base_uom || "Each",
+        case_qty: Math.max(num(g(r, "Units per case"), e.case_qty || 1), 1), case_uom: g(r, "Case unit") || e.case_uom || "Case", item_group: g(r, "Item group") || e.item_group || "", item_group2: g(r, "Item group 2") || e.item_group2 || "",
+        shelf_life_days: Math.max(0, Math.round(num(g(r, "Shelf life (days)"), e.shelf_life_days || 0))), unit_cost: Math.max(0, num(g(r, "Unit cost"), e.unit_cost || 0)), active: ac ? !no(ac) : e.active !== false, updated_at: new Date().toISOString()}; });
+    return {rows, newClients, added: rows.filter(r => !ex.has(r._client + "|" + r.sku)).length, updated: rows.filter(r => ex.has(r._client + "|" + r.sku)).length, bad};
+  },
+  async apply(p) {
+    if (p.newClients.length) await C.q(C.sb.from("clients").insert(p.newClients.map(code => ({code}))));
+    await clients(true); const id = new Map(clientsCache.map(c => [c.code, c.id]));
+    const rows = p.rows.map(({_client, ...r}) => ({...r, client_id: id.get(_client)}));
+    for (let i = 0; i < rows.length; i += 500) await C.q(C.sb.from("items").upsert(rows.slice(i, i + 500), {onConflict: "client_id,sku"}));
+  },
+  done: () => pageSkus($("#main"))
+};
+function uploadDialog(U) {
+  let prep = null;
+  const d = dialog("stdlg", `<h2 style="margin-bottom:6px">${U.title}</h2><p class="hint">${U.help}</p>
+    <p><button class="btn sm" type="button" id="uptpl">Download template</button></p>
+    <label class="drop" style="padding:16px"><input type="file" id="upfile" accept=".xlsx,.xls,.csv,.txt"><strong>Choose the Excel or CSV file</strong></label>
+    <div id="upprev" style="margin-top:10px"></div>
+    <div class="row" style="margin-top:12px"><button class="btn primary" value="ok" id="upgo" disabled>Save</button><button class="btn ghost" value="cancel" formnovalidate>Cancel</button></div>`, async () => {
+    if (!prep) return false;
+    const ok = await C.run(() => U.apply(prep), `${C.fmt(prep.added)} added, ${C.fmt(prep.updated)} updated`);
+    if (ok === false) return false; U.done();
+  });
+  $("#uptpl").onclick = async () => { const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([U.cols.map(c => c[0]), ...U.sample]), "Template"); await C.saveWorkbook(wb, U.name); };
+  $("#upfile").onchange = async e => {
+    const f = e.target.files[0]; if (!f) return; const box = $("#upprev"); box.innerHTML = `<p class="hint">Reading ${esc(f.name)}…</p>`; prep = null; $("#upgo").disabled = true;
+    try {
+      prep = await U.prepare(await C.readTable(f));
+      box.innerHTML = `<div class="banner ${prep.rows.length ? "ok" : "bad"}"><span>${esc(f.name)}: ${C.fmt(prep.added)} new, ${C.fmt(prep.updated)} to update${prep.newClients && prep.newClients.length ? `, new client${prep.newClients.length === 1 ? "" : "s"} ${esc(prep.newClients.join(", "))}` : ""}.</span></div>
+        ${prep.bad.length ? `<div class="banner warn"><span>${C.fmt(prep.bad.length)} row${prep.bad.length === 1 ? "" : "s"} skipped: ${esc(prep.bad.slice(0, 5).join("; "))}${prep.bad.length > 5 ? "…" : ""}</span></div>` : ""}`;
+      $("#upgo").disabled = !prep.rows.length;
+    } catch (err) { box.innerHTML = `<div class="banner bad"><span>${esc(err.message || "Couldn't read the file.")}</span></div>`; }
+  };
+}
 function expandRange(a, b) {   // W2C2C0101A .. W2C2C0120A: exactly one number part differs
   const ta = a.match(/\d+|\D+/g), tb = b.match(/\d+|\D+/g);
   if (!ta || !tb || ta.length !== tb.length) return null;
@@ -607,9 +687,9 @@ function expandRange(a, b) {   // W2C2C0101A .. W2C2C0120A: exactly one number p
 /* =====================================================================
    Exports and clicks
    ===================================================================== */
-async function exportRows(build, map, sheet, name) {
+async function exportRows(build, map, sheet, name, header) {
   C.toast("Preparing the Excel file…");
-  try { const rows = await pageAll(build); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.map(map)), sheet); await C.saveWorkbook(wb, name); } catch (e) { C.fail(e); }
+  try { const rows = await pageAll(build); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.map(map), header ? {header} : undefined), sheet); await C.saveWorkbook(wb, name); } catch (e) { C.fail(e); }
 }
 document.addEventListener("click", async e => {
   const b = e.target.closest("[data-sa]"); if (!b || !C) return;
@@ -637,7 +717,7 @@ document.addEventListener("click", async e => {
     case "sku-new": skuDialog(null); break;
     case "sku-edit": { const v = (C.cache.skuRows || []).find(r => String(r.item_id) === String(id)); if (v) skuDialog(v); break; }
     case "ipage": V.ipage += +b.dataset.d; pageSkus(main); break;
-    case "export-skus": exportRows(() => skuQuery(), v => ({Client: v.client_code, SKU: v.sku, Description: v.description, Barcode: v.barcode, "Base unit": v.base_uom, "Units per case": N(v.case_qty), "Case unit": v.case_uom, "Item group": v.item_group, "Item group 2": v.item_group2, "Shelf life (days)": N(v.shelf_life_days), "Unit cost": N(v.unit_cost), "In stock": N(v.qty), Active: v.active ? "Yes" : "No"}), "Items", `Stowra_items_${new Date().toISOString().slice(0, 10)}.xlsx`); break;
+    case "export-skus": exportRows(() => skuQuery(), v => ({Client: v.client_code, SKU: v.sku, Description: v.description, Barcode: v.barcode, "Base unit": v.base_uom, "Units per case": N(v.case_qty), "Case unit": v.case_uom, "Item group": v.item_group, "Item group 2": v.item_group2, "Shelf life (days)": N(v.shelf_life_days), "Unit cost": N(v.unit_cost), "In stock": N(v.qty), Active: v.active ? "Yes" : "No"}), "Items", `Stowra_items_${new Date().toISOString().slice(0, 10)}.xlsx`, SKU_COLS.map(c => c[0])); break;
     case "lfilter": V.lk = b.dataset.f; V.lpage = 0; pageLocations(main); break;
     case "lpage": V.lpage += +b.dataset.d; pageLocations(main); break;
     case "lclear": V.lsel.clear(); pageLocations(main); break;
@@ -645,7 +725,9 @@ document.addEventListener("click", async e => {
     case "loc-edit": { const l = (C.cache.locRows || []).find(r => String(r.id) === String(id)); if (l) locDialog(l); break; }
     case "loc-stock": V.q = b.dataset.code; V.view = "pallets"; V.f = "all"; V.client = ""; V.page = 0; C.go("stock"); break;
     case "loc-off": case "loc-on": { const ids = [...V.lsel].map(x => isNaN(x) ? x : +x); if (await C.run(() => C.q(C.sb.from("locations").update({active: b.dataset.sa === "loc-on"}).in("id", ids)), "Saved")) { V.lsel.clear(); pageLocations(main); } break; }
-    case "export-locs": exportRows(() => locQuery(), l => ({Code: l.code, Zone: l.zone, Type: KIND[l.kind] || l.kind, "Stock is": l.hold ? "On hold" : "Available", "Mixed SKUs": l.mixed_allowed ? "Allowed" : "One SKU only", Active: l.active ? "Yes" : "No", Notes: l.notes}), "Locations", `Stowra_locations_${new Date().toISOString().slice(0, 10)}.xlsx`); break;
+    case "export-locs": exportRows(() => locQuery(), l => ({Code: l.code, Zone: l.zone, Type: KIND[l.kind] || l.kind, "Stock is": l.hold ? "On hold" : "Available", "Mixed SKUs": l.mixed_allowed ? "Allowed" : "One SKU only", Active: l.active ? "Yes" : "No", Notes: l.notes}), "Locations", `Stowra_locations_${new Date().toISOString().slice(0, 10)}.xlsx`, LOC_COLS.map(c => c[0])); break;
+    case "loc-upload": uploadDialog(LOC_UP); break;
+    case "sku-upload": uploadDialog(SKU_UP); break;
   }
 });
 

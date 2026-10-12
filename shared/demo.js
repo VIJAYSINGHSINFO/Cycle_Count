@@ -597,6 +597,7 @@ function builder(table, me) {
   const api = {
     select(cols, opts) { if (st.op === "select") st.op = "select"; else st.returning = true; if (opts && opts.count) st.count = true; return api; },
     insert(rows) { st.op = "insert"; st.payload = Array.isArray(rows) ? rows : [rows]; return api; },
+    upsert(rows, o) { st.op = "upsert"; st.payload = Array.isArray(rows) ? rows : [rows]; st.conflict = String(o && o.onConflict || "id").split(","); return api; },
     update(p) { st.op = "update"; st.payload = p; return api; },
     delete() { st.op = "delete"; return api; },
     eq(c, v) { st.filters.push(r => r[c] === v); return api; },
@@ -618,6 +619,14 @@ function builder(table, me) {
   function run() {
     const staff = me && ["admin", "supervisor"].includes(me.role) && me.active;
     if (!me) return {data: null, error: {message: "Not signed in", code: "42501"}, count: null};
+    if (st.op === "upsert") {
+      if (!staff) return {data: null, error: {message: "Permission denied", code: "42501"}};
+      if (!STOCK_TABLES[table]) return {data: null, error: {message: "Upsert not supported here", code: "0A000"}};
+      const arr = STOCK_TABLES[table](), up = v => String(v ?? "").toUpperCase();
+      for (const r of st.payload) { const ex = arr.find(x => st.conflict.every(k => up(x[k]) === up(r[k])));
+        if (ex) { const keep = {}; if ("code" in ex) keep.code = ex.code; if ("sku" in ex) keep.sku = ex.sku; Object.assign(ex, r, keep); } else { const x = stockInsert(table, r, me); if (x && x.__err) return {data: null, error: {message: x.__err, code: "23505"}}; } }
+      bumpStock(); return {data: null, error: null};
+    }
     if (st.op === "insert") {
       if (!staff) return {data: null, error: {message: "Permission denied", code: "42501"}};
       const out = st.payload.map(r => {

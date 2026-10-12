@@ -166,7 +166,7 @@ The APK from Part 4 is a *debug* build. It's fine for testing and for installing
 - **Stock history:** every move, hold, release, adjustment and file change, with who and when. It can't be edited.
 - **Phone, Stock tab (everyone except security):** scan a location, pallet label, SKU or barcode to see the stock; tap a line to move it by scanning the new location.
 - **Clients:** rules per client: batch / expiry / mfg date not tracked, optional or required; what the batch field means (for example "Container no."); FEFO or FIFO; near-expiry warning days; minimum shelf life to receive and to dispatch; expired stock on hold automatically. Receiving and picking (next steps) use these rules.
-- **Item master** and **Locations:** correct descriptions, barcodes, units per case, shelf life; set location types (storage, staging, outbound, damage, short, quarantine), one-SKU-only locations, turn locations off, add locations one by one or as a range.
+- **Item master** and **Locations:** correct descriptions, barcodes, units per case, shelf life; set location types (storage, staging, outbound, damage, short, quarantine), one-SKU-only locations, turn locations off, add locations one by one or as a range. Both pages have **Upload from Excel** (with a template to download): new rows are added and existing ones updated, so you can export, edit in Excel and upload again.
 
 **Rules already applied**
 - Expired stock goes on hold automatically (per client setting) when the file is loaded and when the Stock page opens.
