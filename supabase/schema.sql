@@ -2325,3 +2325,18 @@ grant select on public.receipt_v to authenticated;
 
 revoke all on function public.asn_import(jsonb), public.asn_receive(jsonb), public.asn_undo_receipt(bigint, text), public.asn_set_status(uuid, text, text), public.asn_find(text), public.putaway_suggest(bigint) from public, anon;
 grant execute on function public.asn_import(jsonb), public.asn_receive(jsonb), public.asn_undo_receipt(bigint, text), public.asn_set_status(uuid, text, text), public.asn_find(text), public.putaway_suggest(bigint) to authenticated;
+
+-- =====================================================================
+-- Version 8.1: administrators can set a new password for a user (for staff without email access).
+-- Users can also reset their own password with "Forgot password?" on the sign-in screen (email link).
+-- =====================================================================
+create or replace function public.admin_set_password(p_user uuid, p_password text)
+returns void language plpgsql security definer set search_path = public, extensions, auth as $$
+begin
+  if not public.is_admin() then raise exception 'Only administrators can set passwords' using errcode = '42501'; end if;
+  if length(coalesce(p_password, '')) < 8 then raise exception 'The password must have at least 8 characters'; end if;
+  update auth.users set encrypted_password = crypt(p_password, gen_salt('bf')), updated_at = now() where id = p_user;
+  if not found then raise exception 'User not found'; end if;
+end $$;
+revoke all on function public.admin_set_password(uuid, text) from public, anon;
+grant execute on function public.admin_set_password(uuid, text) to authenticated;

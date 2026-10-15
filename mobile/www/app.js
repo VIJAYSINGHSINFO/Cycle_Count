@@ -39,37 +39,58 @@ const vibrate = ms => { try { navigator.vibrate && navigator.vibrate(ms); } catc
 const isServerError = e => e && e.code && /^[0-9A-Z]{5}$/.test(e.code) && e.code !== "PGRST301";
 
 /* ---------- auth ---------- */
+let RECOVERY = /type=recovery/.test(location.hash);
 async function boot() {
   M.outbox = await idb.outAll().catch(() => []);
   const {data: {session}} = await sb.auth.getSession();
   M.uid = session ? session.user.id : null;
+  if (session && RECOVERY) return renderNewPassword();
   if (!session) return renderLogin();
   try { const r = await sb.rpc("whoami"); if (!r.error && r.data && r.data[0]) { M.me = r.data[0]; ls.set("cc-me", M.me); } } catch {}
   if (!M.me || M.me.id !== session.user.id) return renderMessage("Can't reach the server", "Connect to the network once to finish signing in.", true);
   if (!M.me.active) return renderMessage("Waiting for approval", "Your account was created. Ask your supervisor or administrator to approve it, then open the app again.", true);
   renderSessions();
 }
-sb.auth.onAuthStateChange((ev, session) => { const uid = session && session.user ? session.user.id : null; if (uid !== M.uid) { M.uid = uid; setTimeout(boot, 0); } });
+sb.auth.onAuthStateChange((ev, session) => { if (ev === "PASSWORD_RECOVERY") { RECOVERY = true; M.uid = session && session.user ? session.user.id : null; setTimeout(renderNewPassword, 0); return; } const uid = session && session.user ? session.user.id : null; if (uid !== M.uid) { M.uid = uid; setTimeout(boot, 0); } });
 function renderMessage(title, body, withSignOut) {
   $("#root").innerHTML = `<div class="auth"><div class="panel"><div class="brand-big"><svg class="mark" viewBox="-6 -6 76 76" aria-hidden="true"><path d="M0 0H64V16.7H16.7V32H0Z" fill="#13233F"/><path d="M64 64H0V47.3H47.3V32H64Z" fill="#1FA38A"/><rect x="23.4" y="23.4" width="17.2" height="17.2" rx="2.6" fill="#F2A33A"/></svg><span>stowra</span></div><h2>${esc(title)}</h2><p>${esc(body)}</p><div class="row"><button class="btn primary" data-act="retry">Try again</button>${withSignOut ? `<button class="btn" data-act="signout">Sign out</button>` : ""}</div></div></div>`;
 }
 function renderLogin(mode = "in") {
   $("#root").innerHTML = `<div class="auth"><form class="panel" id="authf">
     <div class="brand-big"><svg class="mark" viewBox="-6 -6 76 76" aria-hidden="true"><path d="M0 0H64V16.7H16.7V32H0Z" fill="#13233F"/><path d="M64 64H0V47.3H47.3V32H64Z" fill="#1FA38A"/><rect x="23.4" y="23.4" width="17.2" height="17.2" rx="2.6" fill="#F2A33A"/></svg><span>stowra</span></div>
+    ${mode === "forgot" ? `<h2 style="margin-bottom:6px">Reset your password</h2><p class="small muted" style="margin:0 0 12px">Enter your email. We'll send a link to choose a new password.</p>` : ""}
     ${mode === "up" ? `<label class="field" style="margin-bottom:10px">Full name<input name="full_name" required autocomplete="name"></label>` : ""}
     <label class="field" style="margin-bottom:10px">Email<input name="email" type="email" required autocomplete="email" inputmode="email"></label>
-    <label class="field" style="margin-bottom:16px">Password<input name="password" type="password" required minlength="8"></label>
-    <button class="btn primary" style="width:100%;min-height:50px" type="submit">${mode === "in" ? "Sign in" : "Create account"}</button>
-    <p class="small muted" style="margin:14px 0 0">${mode === "in" ? `No account? <a href="#" data-act="to-signup">Create one</a>. Your supervisor approves it.` : `<a href="#" data-act="to-signin">Back to sign in</a>`}</p>
+    ${mode !== "forgot" ? `<label class="field" style="margin-bottom:16px">Password<input name="password" type="password" required minlength="8"></label>` : ""}
+    <button class="btn primary" style="width:100%;min-height:50px" type="submit">${mode === "in" ? "Sign in" : mode === "forgot" ? "Send reset link" : "Create account"}</button>
+    <p class="small muted" style="margin:14px 0 0">${mode === "in" ? `<a href="#" data-act="to-forgot">Forgot password?</a><br>No account? <a href="#" data-act="to-signup">Create one</a>. Your supervisor approves it.` : mode === "forgot" ? `<a href="#" data-act="to-signin">Back to sign in</a>. No email? Ask your administrator to set a new password.` : `<a href="#" data-act="to-signin">Back to sign in</a>`}</p>
     ${CONFIG.FROM_DEVICE ? `<p class="small muted" style="margin:8px 0 0"><a href="#" data-act="reset-conn">Change database connection</a></p>` : ""}</form></div>`;
   const f = $("#authf"), el = n => f.elements.namedItem(n);
   f.onsubmit = async e => {
     e.preventDefault(); const btn = f.querySelector("[type=submit]"); btn.disabled = true;
     try {
       if (mode === "in") { const {error} = await sb.auth.signInWithPassword({email: el("email").value.trim(), password: el("password").value}); if (error) throw error; }
+      else if (mode === "forgot") {
+        const web = /^https?:$/.test(location.protocol) && !/^(localhost|127\.|0\.0\.0\.0)/.test(location.hostname);
+        const {error} = await sb.auth.resetPasswordForEmail(el("email").value.trim(), web ? {redirectTo: location.origin + location.pathname} : undefined);
+        if (error) throw error;
+        renderMessage("Check your email", `If this email has a Stowra account, a link to choose a new password is on its way (check spam too). Open the link, set the new password, then sign in here with it. No email after 15 minutes? Ask your administrator to set a new password.`, false);
+      }
       else { const {data, error} = await sb.auth.signUp({email: el("email").value.trim(), password: el("password").value, options: {data: {full_name: el("full_name").value.trim()}}}); if (error) throw error; if (!data.session) renderMessage("Check your email", "Confirm your email address, then sign in. Your supervisor will approve the account.", false); }
     } catch (err) { toast(err.message || "Sign-in failed", true); btn.disabled = false; }
   };
+}
+
+function renderNewPassword() {
+  $("#root").innerHTML = `<div class="auth"><form class="panel" id="npf"><h2 style="margin-bottom:12px">Choose a new password</h2>
+    <label class="field" style="margin-bottom:10px">New password<input name="p1" type="password" required minlength="8" autocomplete="new-password"></label>
+    <label class="field" style="margin-bottom:16px">Type it again<input name="p2" type="password" required minlength="8" autocomplete="new-password"></label>
+    <button class="btn primary" style="width:100%;min-height:50px" type="submit">Save new password</button></form></div>`;
+  const f = $("#npf");
+  f.onsubmit = async e => { e.preventDefault(); if (f.p1.value !== f.p2.value) return toast("The two passwords are different.", true);
+    const btn = f.querySelector("button"); btn.disabled = true;
+    try { const {error} = await sb.auth.updateUser({password: f.p1.value}); if (error) throw error; RECOVERY = false; history.replaceState(null, "", location.pathname); toast("Password changed"); boot(); }
+    catch (err) { toast(err.message || "Couldn't save the password", true); btn.disabled = false; } };
 }
 
 /* ---------- sessions list ---------- */
@@ -692,6 +713,7 @@ document.addEventListener("click", async e => {
     case "signout": if (M.outbox.length && !confirmTwice(b, "so", `${M.outbox.length} not synced. Sign out anyway?`)) break; await sb.auth.signOut(); break;
     case "retry": boot(); break;
     case "reset-conn": window.CC_resetConnection(); break;
+    case "to-forgot": renderLogin("forgot"); break;
     case "to-signup": renderLogin("up"); break;
     case "to-signin": renderLogin("in"); break;
     case "reload-sessions": renderSessions(); break;

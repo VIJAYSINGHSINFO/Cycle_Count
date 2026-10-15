@@ -817,6 +817,7 @@ function rpc(name, a, me) {
   const ev = (sid, line_id, event, extra = {}) => S.events.push({id: (S.evPrefix || "") + (++S.evId), session_id: sid, line_id, event, user_id: me.id, created_at: tick(), ...extra});
   switch (name) {
     case "whoami": return {data: me ? [me] : [], error: null};
+    case "admin_set_password": if (!me || me.role !== "admin" || !me.active) return E("Only administrators can set passwords"); if (String(a.p_password || "").length < 8) return E("The password must have at least 8 characters"); if (!S.users.some(u => u.id === a.p_user)) return E("User not found"); return {data: null, error: null};
     case "mobile_sessions": if (!me || !me.active) return {data: [], error: null};
       return {data: S.sessions.filter(s => s.status === "open").map(s => ({...s, ...stats(s)})), error: null};
     case "mobile_lines": {
@@ -897,6 +898,8 @@ function createClient() {
       onAuthStateChange: f => { listeners.push(f); return {data: {subscription: {unsubscribe() {}}}}; },
       signInWithPassword: async ({email}) => { const u = S.users.find(x => x.email.toLowerCase() === String(email).toLowerCase()); if (!u) return {error: {message: "Demo accounts: sara@, omar@, ali@ or priya@demo.local (any password)"}}; S.sessionFor[key] = u.id; setTimeout(() => emit("SIGNED_IN")); return {data: {session: session()}, error: null}; },
       signUp: async ({email, options}) => { const u = {id: "u-" + Date.now(), full_name: (options && options.data && options.data.full_name) || email.split("@")[0], email, role: "counter", site: "", active: false, created_at: tick()}; S.users.push(u); S.sessionFor[key] = u.id; setTimeout(() => emit("SIGNED_IN")); return {data: {session: session()}, error: null}; },
+      resetPasswordForEmail: async () => ({data: {}, error: null}),
+      updateUser: async ({password}) => String(password || "").length < 8 ? {data: null, error: {message: "Password should be at least 8 characters"}} : {data: {user: session() && session().user}, error: null},
       signOut: async () => { S.sessionFor[key] = null; setTimeout(() => emit("SIGNED_OUT")); return {error: null}; }
     },
     from: t => builder(t, me()),

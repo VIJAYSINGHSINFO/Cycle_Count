@@ -15,7 +15,7 @@ const SESSION_LABEL = {draft: "Draft", open: "Counting", closed: "Closed", recon
 
 if (!CONFIG.DEMO && CONFIG.isPlaceholder()) { window.CC_showSetup(); return; }
 const sb = supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY, {auth: {persistSession: true, autoRefreshToken: true}});
-const S = {me: null, timer: null};
+const S = {me: null, timer: null, recovery: /type=recovery/.test(location.hash)};
 
 /* ---------- helpers ---------- */
 let tT;
@@ -33,6 +33,7 @@ function confirmTwice(btn, key, label) { if (armed.has(key)) { armed.delete(key)
 async function boot() {
   const {data: {session}} = await sb.auth.getSession();
   S.uid = session ? session.user.id : null;
+  if (session && S.recovery) return renderNewPassword();
   if (!session) return renderLogin();
   try { const rows = await q(sb.rpc("whoami")); S.me = rows && rows[0]; } catch (e) { S.me = null; }
   if (!S.me || !S.me.active) return renderMessage("Waiting for approval", `Your account (${esc(session.user.email)}) was created. An administrator needs to approve it and assign a role before you can sign in.`);
@@ -40,6 +41,7 @@ async function boot() {
   renderShell();
 }
 sb.auth.onAuthStateChange((ev, session) => {   // react only when the signed-in user actually changes
+  if (ev === "PASSWORD_RECOVERY") { S.recovery = true; S.uid = session && session.user ? session.user.id : null; setTimeout(renderNewPassword, 0); return; }
   const uid = session && session.user ? session.user.id : null;
   if (uid !== S.uid) { S.uid = uid; setTimeout(boot, 0); }
 });
@@ -49,12 +51,13 @@ function renderMessage(title, body) {
 function renderLogin(mode = "in") {
   $("#root").innerHTML = `<div class="auth"><form class="panel" id="authf">
     <div class="brand-big">${MARK}<span>stowra<small>Warehouse console</small></span></div>
-    <h2 style="margin-bottom:14px">${mode === "in" ? "Sign in" : "Create an account"}</h2>
+    <h2 style="margin-bottom:14px">${mode === "in" ? "Sign in" : mode === "forgot" ? "Reset your password" : "Create an account"}</h2>
+    ${mode === "forgot" ? `<p class="small muted" style="margin:-6px 0 12px">Enter your email. We'll send a link to choose a new password.</p>` : ""}
     ${mode === "up" ? `<label class="field" style="margin-bottom:10px">Full name<input name="full_name" required autocomplete="name"></label>` : ""}
     <label class="field" style="margin-bottom:10px">Email<input name="email" type="email" required autocomplete="email"></label>
-    <label class="field" style="margin-bottom:16px">Password<input name="password" type="password" required minlength="8" autocomplete="${mode === "in" ? "current-password" : "new-password"}"></label>
-    <button class="btn primary" style="width:100%" type="submit">${mode === "in" ? "Sign in" : "Create account"}</button>
-    <p class="small muted" style="margin:14px 0 0">${mode === "in" ? `New here? <a href="#" data-act="to-signup">Create an account</a>. An administrator approves new accounts.` : `Already have an account? <a href="#" data-act="to-signin">Sign in</a>.`}</p>
+    ${mode !== "forgot" ? `<label class="field" style="margin-bottom:16px">Password<input name="password" type="password" required minlength="8" autocomplete="${mode === "in" ? "current-password" : "new-password"}"></label>` : ""}
+    <button class="btn primary" style="width:100%" type="submit">${mode === "in" ? "Sign in" : mode === "forgot" ? "Send reset link" : "Create account"}</button>
+    <p class="small muted" style="margin:14px 0 0">${mode === "in" ? `<a href="#" data-act="to-forgot">Forgot password?</a><br>New here? <a href="#" data-act="to-signup">Create an account</a>. An administrator approves new accounts.` : mode === "forgot" ? `<a href="#" data-act="to-signin">Back to sign in</a>. No email? Ask your administrator to set a new password for you.` : `Already have an account? <a href="#" data-act="to-signin">Sign in</a>.`}</p>
     ${CONFIG.FROM_DEVICE ? `<p class="small muted" style="margin:8px 0 0"><a href="#" data-act="reset-conn">Change database connection</a></p>` : ""}
   </form></div>`;
   const f = $("#authf"), el = n => f.elements.namedItem(n);
@@ -63,6 +66,11 @@ function renderLogin(mode = "in") {
     const btn = f.querySelector("button[type=submit]"); btn.disabled = true;
     try {
       if (mode === "in") { const {error} = await sb.auth.signInWithPassword({email: el("email").value.trim(), password: el("password").value}); if (error) throw error; }
+      else if (mode === "forgot") {
+        const {error} = await sb.auth.resetPasswordForEmail(el("email").value.trim(), {redirectTo: location.origin + location.pathname});
+        if (error) throw error;
+        renderMessage("Check your email", `If ${esc(el("email").value.trim())} has a Stowra account, a link to choose a new password is on its way. Open it on this computer. It can take a few minutes; check the spam folder too. No email after 15 minutes? Ask your administrator to set a new password for you.`);
+      }
       else {
         const {data, error} = await sb.auth.signUp({email: el("email").value.trim(), password: el("password").value, options: {data: {full_name: el("full_name").value.trim()}}});
         if (error) throw error;
@@ -70,6 +78,46 @@ function renderLogin(mode = "in") {
       }
     } catch (err) { fail(err); btn.disabled = false; }
   };
+}
+
+function renderNewPassword() {
+  $("#root").innerHTML = `<div class="auth"><form class="panel" id="npf">
+    <div class="brand-big">${MARK}<span>stowra<small>Warehouse console</small></span></div>
+    <h2 style="margin-bottom:14px">Choose a new password</h2>
+    <label class="field" style="margin-bottom:10px">New password<input name="p1" type="password" required minlength="8" autocomplete="new-password"></label>
+    <label class="field" style="margin-bottom:16px">Type it again<input name="p2" type="password" required minlength="8" autocomplete="new-password"></label>
+    <button class="btn primary" style="width:100%" type="submit">Save new password</button>
+    <p class="small muted" style="margin:14px 0 0">At least 8 characters. After saving, sign in with it in the console and in the phone app.</p></form></div>`;
+  const f = $("#npf");
+  f.onsubmit = async e => {
+    e.preventDefault(); const a = f.p1.value, b = f.p2.value, btn = f.querySelector("button"); if (a !== b) return toast("The two passwords are different.", true);
+    btn.disabled = true;
+    try { const {error} = await sb.auth.updateUser({password: a}); if (error) throw error; S.recovery = false; history.replaceState(null, "", location.pathname + "#/"); toast("Password changed"); boot(); }
+    catch (err) { fail(err); btn.disabled = false; }
+  };
+}
+function changePasswordDialog() {
+  let d = $("#pwdlg"); if (d) d.remove();
+  d = document.createElement("dialog"); d.id = "pwdlg";
+  d.innerHTML = `<form method="dialog"><h2 style="margin-bottom:12px">Change your password</h2>
+    <label class="field" style="margin-bottom:10px">New password<input name="p1" type="password" minlength="8" required autocomplete="new-password"></label>
+    <label class="field" style="margin-bottom:14px">Type it again<input name="p2" type="password" minlength="8" required autocomplete="new-password"></label>
+    <div class="row"><button class="btn primary" value="ok">Save</button><button class="btn ghost" value="cancel" formnovalidate>Cancel</button></div></form>`;
+  document.body.appendChild(d); d.showModal();
+  d.querySelector("form").onsubmit = async e => { if (!e.submitter || e.submitter.value !== "ok") return; e.preventDefault(); const f = e.target;
+    if (f.p1.value !== f.p2.value) return toast("The two passwords are different.", true);
+    const {error} = await sb.auth.updateUser({password: f.p1.value}); if (error) return fail(error); d.close(); toast("Password changed"); };
+}
+function setPasswordDialog(id, name) {
+  let d = $("#pwdlg"); if (d) d.remove();
+  const sug = "Stowra-" + Math.floor(1000 + Math.random() * 9000);
+  d = document.createElement("dialog"); d.id = "pwdlg";
+  d.innerHTML = `<form method="dialog"><h2 style="margin-bottom:6px">Set a new password</h2><p class="hint">For ${esc(name)}. Give it to them in person; they can change it later with "Forgot password?" or in the console.</p>
+    <label class="field" style="margin-bottom:14px">New password<input name="p" type="text" minlength="8" required value="${sug}" autocomplete="off"></label>
+    <div class="row"><button class="btn primary" value="ok">Set password</button><button class="btn ghost" value="cancel" formnovalidate>Cancel</button></div></form>`;
+  document.body.appendChild(d); d.showModal();
+  d.querySelector("form").onsubmit = async e => { if (!e.submitter || e.submitter.value !== "ok") return; e.preventDefault();
+    if (await run(() => q(sb.rpc("admin_set_password", {p_user: id, p_password: e.target.p.value})), `New password set for ${name}`)) d.close(); };
 }
 
 /* ---------- shell ---------- */
@@ -93,7 +141,7 @@ function renderShell() {
       <a href="#/gate" data-nav="gate">Gate and yard</a>
       <a href="#/labels" data-nav="labels">Barcode labels</a>
       ${S.me.role === "admin" ? `<div class="navh">Admin</div><a href="#/checklists" data-nav="checklists">Checklists</a><a href="#/users" data-nav="users">Users</a><a href="#/settings" data-nav="settings">Settings</a>` : ""}
-      <div class="me">${esc(S.me.full_name)}<br><span style="opacity:.7">${S.me.role === "admin" ? "Administrator" : "Supervisor"}</span><br><button data-act="signout">Sign out</button></div>
+      <div class="me">${esc(S.me.full_name)}<br><span style="opacity:.7">${S.me.role === "admin" ? "Administrator" : "Supervisor"}</span><br><button data-act="change-pw">Change password</button> <button data-act="signout">Sign out</button></div>
     </nav>
     <main class="main" id="main"></main></div>`;
   loadOrgName();
@@ -539,7 +587,7 @@ async function pageUsers() {
       <td><select class="search" style="min-width:0" data-f="role" ${u.id === S.me.id ? "disabled" : ""}>${[["counter", "Operator (mobile: counting, QC, docks)"], ["security", "Security (mobile: gate only)"], ["supervisor", "Supervisor"], ["admin", "Administrator"]].map(([k, l]) => `<option value="${k}" ${(u.role === "counter" && u.job === "security" ? "security" : u.role) === k ? "selected" : ""}>${l}</option>`).join("")}</select></td>
       <td><input class="search" style="min-width:100px" data-f="site" value="${esc(u.site)}"></td>
       <td><label class="check"><input type="checkbox" data-f="active" ${u.active ? "checked" : ""} ${u.id === S.me.id ? "disabled" : ""}> ${u.active ? "Active" : "Not approved"}</label></td>
-      <td><button class="btn sm" data-act="save-user">Save</button></td></tr>`).join("")}</tbody></table></div>`;
+      <td style="white-space:nowrap"><button class="btn sm" data-act="save-user">Save</button> <button class="btn sm ghost" data-act="set-pw" data-name="${esc(u.full_name || u.email || "")}">Set password</button></td></tr>`).join("")}</tbody></table></div>`;
 }
 
 /* ---------- clicks ---------- */
@@ -552,6 +600,9 @@ document.addEventListener("click", async e => {
     case "reset-conn": window.CC_resetConnection(); break;
     case "to-signup": renderLogin("up"); break;
     case "to-signin": renderLogin("in"); break;
+    case "to-forgot": renderLogin("forgot"); break;
+    case "change-pw": changePasswordDialog(); break;
+    case "set-pw": setPasswordDialog(b.closest("tr").dataset.uid, b.dataset.name); break;
     case "count-filter": sessionStorage.setItem("cc-filter", b.dataset.f); pageCounts(); break;
     case "new-count": { const d = $("#newdlg"); d.showModal(); d.onclose = () => { if (d.returnValue === "ok") createCount(); }; break; }
     case "open-count": V.sel = new Set(); V.page = 0; go(`count/${b.dataset.id}/overview`); break;

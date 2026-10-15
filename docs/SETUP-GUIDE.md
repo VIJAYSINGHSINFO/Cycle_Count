@@ -153,6 +153,20 @@ The APK from Part 4 is a *debug* build. It's fine for testing and for installing
    - **Start at label position** lets you reuse a partly used label sheet.
    - If a code can't be encoded in the chosen barcode type (for example letters in EAN-13), or the bars would be too thin to scan, the console lists it before printing.
 
+## Passwords (forgot / reset)
+
+- **Forgot password?** on the sign-in screen of the console and the phone sends a reset link by email. The person opens it, chooses a new password, then signs in with it everywhere.
+- **Administrators:** console > Users > **Set password** gives someone a new password straight away (for staff without email access). Tell them in person.
+- **Anyone in the console:** **Change password** under their name in the menu.
+
+**One-time Supabase setting for the email link:** Supabase dashboard > Authentication > URL Configuration.
+- **Site URL:** your console address, e.g. `https://<your-github-name>.github.io/<repository>/console/`
+- **Redirect URLs:** add the console address and the mobile address (`…/mobile/`).
+
+Links from the phone app open the console page in the browser; after choosing the new password, sign in on the phone with it.
+
+Supabase's built-in email sender is meant for testing and only sends a few emails per hour (check the current limit in Supabase). For everyday use, add your company's email server under Authentication > Emails > SMTP settings. Until then, administrators can use **Set password**.
+
 ## Version 8: inbound (ASNs, receiving, putaway)
 
 **Do this once:** run the new `supabase/schema.sql` in the Supabase SQL Editor (clear, paste the whole file, Run, confirm the warning). Existing data is kept.
