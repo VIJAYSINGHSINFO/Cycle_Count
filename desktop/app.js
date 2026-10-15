@@ -78,7 +78,8 @@ function renderShell() {
     <nav class="side" aria-label="Main">
       <div class="brand">${MARK_NAVY}<span class="wordmark">stowra</span></div>
       <div class="orgname" id="orgname"></div>
-      <div class="navh">Stock</div>
+      <div class="navh">Warehouse</div>
+      <a href="#/inbound" data-nav="inbound">Inbound</a>
       <a href="#/stock" data-nav="stock">Stock</a>
       <a href="#/skus" data-nav="skus">Item master</a>
       <a href="#/locations" data-nav="locations">Locations</a>
@@ -108,6 +109,7 @@ function onRoute() {
   window.scrollTo(0, 0);
   const m = $("#main"); m.innerHTML = `<div class="loading">Loading…</div>`;
   ({counts: pageCounts, count: () => pageCount(id, tab || "overview"), history: pageHistory, items: pageItems, labels: () => window.CCLabels.page($("#main"), {sb, q, toast, parseDelimited}), qc: () => window.CCQc.page($("#main"), qcCtx(), id), gate: () => window.CCGate.page($("#main"), qcCtx(), id), settings: () => window.CCGate.page($("#main"), qcCtx(), null, "settings"), checklists: () => window.CCChecklists.page($("#main"), qcCtx(), id), users: pageUsers,
+    inbound: () => window.CCInbound.page($("#main"), qcCtx(), id),
     stock: () => window.CCStock.page($("#main"), qcCtx(), id, tab), clients: () => window.CCStock.page($("#main"), qcCtx(), "clients", id), skus: () => window.CCStock.page($("#main"), qcCtx(), "skus"), locations: () => window.CCStock.page($("#main"), qcCtx(), "locations")}[page] || pageCounts)();
 }
 

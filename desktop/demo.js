@@ -483,7 +483,7 @@ const stockViews = {
   stock_move_list: () => { const cl = new Map(S.clients.map(c => [c.id, c])), it = new Map(S.items.map(i => [i.id, i])); return S.stockMoves.map(m => ({...m, client_code: (cl.get(m.client_id) || {}).code || null, sku: (it.get(m.item_id) || {}).sku || null, description: (it.get(m.item_id) || {}).description || null, user_name: uname(m.user_id)})); }
 };
 const bumpStock = () => { S.stockVer = (S.stockVer || 0) + 1; };
-const STOCK_TABLES = {clients: () => S.clients, items: () => S.items, locations: () => S.locations, stock_imports: () => S.stockImports, stock_import_rows: () => S.stockImportRows};
+const STOCK_TABLES = {asns: () => S.asns, clients: () => S.clients, items: () => S.items, locations: () => S.locations, stock_imports: () => S.stockImports, stock_import_rows: () => S.stockImportRows};
 function stockInsert(table, r, me) {
   bumpStock();
   const up = s => String(s || "").trim().toUpperCase();
@@ -589,6 +589,148 @@ function stockRpc(name, a, me, staff) {
 
 Object.assign(views, stockViews);
 if (!S.clients) seedStock(S);
+/* ---------- Inbound: ASNs, receiving, putaway (demo) ---------- */
+function seedAsn(S) {
+  S.asns = []; S.asnLines = []; S.receipts = []; S.lpnSeq = 1000;
+  const cl = code => S.clients.find(c => c.code === code), now = tick();
+  ["RECV-01", "RECV-02"].forEach(code => { if (!S.locations.some(l => l.code === code)) S.locations.push({...newLoc(code, "RECEIVING"), kind: "staging"}); });
+  const mk = (code, asn_no, ext_ref, supplier, days, lines) => {
+    const c = cl(code); if (!c) return;
+    const a = {id: sid("asn"), client_id: c.id, asn_no, ext_ref, supplier, expected_date: new Date(Date.now() + days * 864e5).toISOString().slice(0, 10), status: "open", notes: "", source_file: "ASN_sample.xlsx",
+      created_by: "u-sup", created_at: now, started_at: null, received_at: null, closed_at: null, closed_by: null, close_note: "", updated_at: now};
+    S.asns.push(a);
+    const its = S.items.filter(i => i.client_id === c.id);
+    lines.forEach(([idx, qty, batch, exp], n) => { const it = its[idx % its.length]; if (!it) return; S.asnLines.push({id: sid("al"), asn_id: a.id, line_no: n + 1, item_id: it.id, expected_qty: qty, received_qty: 0, damaged_qty: 0, batch: batch || "", expiry_date: exp || null, not_on_asn: false, updated_at: now}); });
+  };
+  mk("TGD", "ASN-55120", "PO-77188", "Chemist Warehouse AU", 0, [[0, 120], [3, 48], [5, 200], [8, 36]]);
+  mk("FIXPRICE", "ASN-60311", "PO 6207701122", "China container EISU9007794", 1, [[1, 240], [4, 96], [7, 144]]);
+  mk("TGD", "ASN-55131", "PO-77190", "Chemist Warehouse AU", 2, [[10, 60], [12, 24]]);
+}
+const asnViews = {
+  asns: () => S.asns, asn_lines: () => S.asnLines, receipts: () => S.receipts,
+  asn_list: () => S.asns.map(a => { const L = S.asnLines.filter(l => l.asn_id === a.id), R = S.receipts.filter(r => r.asn_id === a.id && !r.cancelled), c = S.clients.find(x => x.id === a.client_id) || {}, sum = f => L.reduce((s, l) => s + f(l), 0);
+    return {...a, client_code: c.code, client_name: c.name, created_by_name: uname(a.created_by), closed_by_name: uname(a.closed_by), lines: L.length, expected_qty: sum(l => l.expected_qty), received_qty: sum(l => l.received_qty), damaged_qty: sum(l => l.damaged_qty),
+      short_qty: sum(l => Math.max(l.expected_qty - l.received_qty - l.damaged_qty, 0)), excess_qty: sum(l => Math.max(l.received_qty + l.damaged_qty - l.expected_qty, 0)), not_on_asn_lines: L.filter(l => l.not_on_asn).length,
+      pallets: R.length, flagged_pallets: R.filter(r => r.flags.length || r.condition === "damaged").length, last_at: R.reduce((m, r) => !m || r.created_at > m ? r.created_at : m, null)}; }),
+  asn_line_v: () => S.asnLines.map(l => { const it = S.items.find(i => i.id === l.item_id) || {}; return {...l, sku: it.sku, description: it.description, barcode: it.barcode, base_uom: it.base_uom, case_qty: it.case_qty, case_uom: it.case_uom, short_qty: Math.max(l.expected_qty - l.received_qty - l.damaged_qty, 0), excess_qty: Math.max(l.received_qty + l.damaged_qty - l.expected_qty, 0)}; }),
+  receipt_v: () => S.receipts.map(r => { const it = S.items.find(i => i.id === r.item_id) || {}, a = S.asns.find(x => x.id === r.asn_id) || {}, inv = S.inventory.find(i => i.id === r.inventory_id), cl = inv ? S.locations.find(l => l.id === inv.location_id) : null;
+    return {...r, asn_no: a.asn_no, sku: it.sku, description: it.description, base_uom: it.base_uom, case_qty: it.case_qty, case_uom: it.case_uom, location: (S.locations.find(l => l.id === r.location_id) || {}).code, user_name: uname(r.user_id),
+      current_location: cl ? cl.code : null, current_location_kind: cl ? cl.kind : null, stock_status: inv ? inv.status : null, hold_reason: inv ? inv.hold_reason : null, put_away: !!(inv && cl && !["staging", "dock"].includes(cl.kind))}; })
+};
+function asnRpc(name, a, me, staff) {
+  if (!me || !me.active) return E("Your user is not active");
+  const up = s => String(s ?? "").trim().toUpperCase(), t = uaeToday(), ok = d => ({data: d, error: null});
+  bumpStock();
+  switch (name) {
+    case "asn_import": {
+      if (!staff) return E("Only supervisors can load ASNs");
+      const p = a.p || {}, rows = (p.rows || []).map(x => ({client: up(x.client), client_name: String(x.client_name || "").trim(), asn_no: up(x.asn_no), ext_ref: String(x.ext_ref || "").trim(), supplier: String(x.supplier || "").trim(), expected_date: x.expected_date || null, sku: up(x.sku), descr: String(x.descr || "").trim(), qty: +x.qty || 0, batch: String(x.batch || "").trim(), expiry_date: x.expiry_date || null}));
+      if (!rows.length) return E("The file has no ASN lines");
+      if (rows.some(r => !r.client || !r.asn_no || !r.sku)) return E("Every line needs a client, an ASN number and a SKU");
+      if (rows.some(r => r.qty <= 0)) return E("Every line needs a quantity above 0");
+      rows.forEach(r => { if (!S.clients.some(c => c.code === r.client)) S.clients.push(newClient(r.client, r.client_name)); });
+      const cid = code => S.clients.find(c => c.code === code).id, findItem = r => S.items.find(i => i.client_id === cid(r.client) && i.sku === r.sku);
+      let nItems = 0;
+      const missing = rows.find(r => !findItem(r));
+      if (missing && !p.create_items) return E(`SKU ${missing.sku} (${missing.client}) isn't in the item master. Add it first, or tick "create missing items".`);
+      rows.forEach(r => { if (!findItem(r)) { S.items.push(newItem(cid(r.client), r.sku, {description: r.descr})); nItems++; } });
+      const groups = new Map(); rows.forEach(r => { const k = r.client + "|" + r.asn_no; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); });
+      for (const [k, rs] of groups) { const ex = S.asns.find(x => x.client_id === cid(rs[0].client) && x.asn_no === rs[0].asn_no);
+        if (ex && (!["open", "cancelled"].includes(ex.status) || S.receipts.some(r => r.asn_id === ex.id && !r.cancelled))) return E(`ASN ${rs[0].asn_no} (${rs[0].client}) is already being received, so it can't be replaced`); }
+      let nNew = 0, nRep = 0, nLines = 0;
+      for (const [, rs] of groups) {
+        const r0 = rs[0]; let x = S.asns.find(y => y.client_id === cid(r0.client) && y.asn_no === r0.asn_no);
+        const hdr = {ext_ref: rs.map(r => r.ext_ref).filter(Boolean).pop() || "", supplier: rs.map(r => r.supplier).filter(Boolean).pop() || "", expected_date: rs.map(r => r.expected_date).filter(Boolean).pop() || null, status: "open", source_file: p.file || "", updated_at: tick()};
+        if (x) { S.asnLines = S.asnLines.filter(l => l.asn_id !== x.id); Object.assign(x, hdr); nRep++; }
+        else { x = {id: sid("asn"), client_id: cid(r0.client), asn_no: r0.asn_no, notes: "", created_by: me.id, created_at: tick(), started_at: null, received_at: null, closed_at: null, closed_by: null, close_note: "", ...hdr}; S.asns.push(x); nNew++; }
+        const agg = new Map(); rs.forEach(r => { const it = findItem(r), k = it.id + "|" + r.batch + "|" + (r.expiry_date || ""); if (!agg.has(k)) agg.set(k, {item_id: it.id, qty: 0, batch: r.batch, expiry_date: r.expiry_date}); agg.get(k).qty += r.qty; });
+        let n = 0; for (const g of agg.values()) { S.asnLines.push({id: sid("al"), asn_id: x.id, line_no: ++n, item_id: g.item_id, expected_qty: g.qty, received_qty: 0, damaged_qty: 0, batch: g.batch, expiry_date: g.expiry_date, not_on_asn: false, updated_at: tick()}); nLines++; }
+      }
+      return ok({new: nNew, replaced: nRep, lines: nLines, new_items: nItems});
+    }
+    case "asn_receive": {
+      const p = a.p || {};
+      if (p.client_uuid) { const r = S.receipts.find(x => x.client_uuid === p.client_uuid); if (r) return ok({ok: true, repeat: true, receipt_id: r.id, lpn: r.lpn}); }
+      const x = S.asns.find(y => y.id === p.asn_id); if (!x) return E("ASN not found");
+      if (["closed", "cancelled"].includes(x.status)) return E(`ASN ${x.asn_no} is ${x.status}`);
+      const c = S.clients.find(y => y.id === x.client_id), code = up(p.code);
+      const it = S.items.find(i => i.client_id === c.id && i.sku === code) || S.items.find(i => i.client_id === c.id && i.barcode && up(i.barcode) === code);
+      if (!it) return E(`NOTITEM:${code} isn't a ${c.code} item. Ask a supervisor to add it to the item master.`);
+      const qty = +p.qty, cond = p.condition || "good", batch = String(p.batch || "").trim(), mfg = p.mfg_date || null, exp = p.expiry_date || null; let lpn = up(p.lpn);
+      if (!(qty > 0)) return E("Enter the quantity received");
+      if (cond === "damaged" && !String(p.damage_reason || "").trim()) return E("Choose the damage reason");
+      if (c.track_batch === "required" && !batch) return E(`${c.batch_label} is required for ${c.code}`);
+      if (c.track_expiry === "required" && !exp) return E(`The expiry date is required for ${c.code}`);
+      if (c.track_mfg === "required" && !mfg) return E(`The manufacturing date is required for ${c.code}`);
+      if (mfg && mfg > t) return E("The manufacturing date is in the future");
+      if (mfg && exp && exp <= mfg) return E("The expiry date must be after the manufacturing date");
+      const l = S.locations.find(y => y.code === up(p.location)); if (!l) return E(`Scan the receiving location first (${up(p.location)} doesn't exist)`); if (!l.active) return E(`Location ${l.code} is turned off`);
+      if (lpn && S.inventory.some(i => up(i.lpn) === lpn)) return E(`Pallet label ${lpn} is already used. Scan a new label or leave it empty to create one.`);
+      const mine = S.asnLines.filter(y => y.asn_id === x.id && y.item_id === it.id), flags = []; let ln;
+      if (!mine.length) { if (!p.confirm) return E(`CONFIRM:${it.sku} (${it.description}) is not on ASN ${x.asn_no}. Receive it anyway?`);
+        ln = {id: sid("al"), asn_id: x.id, line_no: S.asnLines.filter(y => y.asn_id === x.id).reduce((m, y) => Math.max(m, y.line_no), 0) + 1, item_id: it.id, expected_qty: 0, received_qty: 0, damaged_qty: 0, batch: "", expiry_date: null, not_on_asn: true, updated_at: tick()}; S.asnLines.push(ln); flags.push("not_on_asn"); }
+      else { ln = mine.slice().sort((p1, p2) => ((p2.received_qty + p2.damaged_qty < p2.expected_qty) - (p1.received_qty + p1.damaged_qty < p1.expected_qty)) || ((p2.batch === batch) - (p1.batch === batch)) || p1.line_no - p2.line_no)[0];
+        const done = mine.reduce((s, y) => s + y.received_qty + y.damaged_qty, 0), expd = mine.reduce((s, y) => s + y.expected_qty, 0);
+        if (done + qty > expd) { if (!p.confirm) return E(`CONFIRM:That makes ${done + qty} of ${it.sku}, but the ASN says ${expd}. Receive ${done + qty - Math.max(expd, done)} extra?`); flags.push("excess"); } }
+      let st = "ok", reason = "";
+      if (cond === "damaged") { st = "hold"; reason = "Damaged on receipt: " + String(p.damage_reason).trim(); }
+      if (exp && exp < t) { flags.push("expired"); st = "hold"; reason = (reason ? reason + "; " : "") + "Expired on arrival"; }
+      if (exp && +c.min_life_receive_pct > 0 && st === "ok") { const days = (Date.parse(exp) - Date.parse(t)) / 864e5, life = it.shelf_life_days > 0 ? days / it.shelf_life_days * 100 : mfg && exp > mfg ? days / ((Date.parse(exp) - Date.parse(mfg)) / 864e5) * 100 : null;
+        if (life != null && life < +c.min_life_receive_pct) { flags.push("short_life"); st = "hold"; reason = `Short shelf life on receipt: ${Math.round(life)}% left, ${c.code} needs ${c.min_life_receive_pct}%`; } }
+      if (l.hold && st === "ok") { st = "hold"; reason = "In " + l.code; }
+      if (!lpn) lpn = "SW" + String(++S.lpnSeq + Math.floor(Math.random() * 9e5)).padStart(8, "0");
+      const inv = {id: sid("iv"), client_id: c.id, item_id: it.id, location_id: l.id, lpn, batch, ref2: "", mfg_date: mfg, expiry_date: exp, received_at: tick(), asn: x.asn_no, ext_ref: x.ext_ref, qty, allocated_qty: 0, picked_qty: 0, status: st, hold_reason: reason, updated_at: tick(), updated_by: me.id};
+      S.inventory.push(inv);
+      if (cond === "good") ln.received_qty += qty; else ln.damaged_qty += qty; ln.updated_at = tick();
+      const r = {id: sid("rc"), asn_id: x.id, asn_line_id: ln.id, item_id: it.id, inventory_id: inv.id, location_id: l.id, lpn, batch, mfg_date: mfg, expiry_date: exp, qty, condition: cond, damage_reason: String(p.damage_reason || "").trim(), flags, cancelled: false, cancelled_by: null, cancelled_at: null, user_id: me.id, device: p.device || null, client_uuid: p.client_uuid || null, created_at: tick()};
+      S.receipts.push(r);
+      if (x.status === "open") x.status = "receiving"; x.started_at = x.started_at || tick(); x.updated_at = tick();
+      S.stockMoves.push(mv({kind: "receive", client_id: c.id, item_id: it.id, inventory_id: inv.id, to_loc: l.code, lpn, batch, expiry_date: exp, qty, qty_before: 0, qty_after: qty, reason: cond === "damaged" ? "Damaged on receipt" : "Received", note: flags.join(", "), ref: x.asn_no, device: p.device || null}, me));
+      return ok({ok: true, receipt_id: r.id, lpn, status: st, hold_reason: reason, flags, sku: it.sku});
+    }
+    case "asn_undo_receipt": {
+      const r = S.receipts.find(y => y.id === a.p_receipt); if (!r || r.cancelled) return E("This receipt is already undone");
+      if (!staff && (r.user_id !== me.id || Date.parse(r.created_at) < Date.now() - 2 * 3600e3)) return E("Ask a supervisor to undo this receipt");
+      const x = S.asns.find(y => y.id === r.asn_id); if (["closed", "cancelled"].includes(x.status)) return E(`ASN ${x.asn_no} is closed`);
+      const v = S.inventory.find(i => i.id === r.inventory_id);
+      if (!v || v.qty !== r.qty || v.location_id !== r.location_id || v.allocated_qty + v.picked_qty > 0) return E("The pallet has already been moved or changed, so the receipt can't be undone. Adjust the stock instead.");
+      const lc = (S.locations.find(l => l.id === v.location_id) || {}).code || "";
+      S.inventory = S.inventory.filter(i => i !== v); Object.assign(r, {cancelled: true, cancelled_by: me.id, cancelled_at: tick()});
+      const ln = S.asnLines.find(y => y.id === r.asn_line_id); if (ln) { if (r.condition === "good") ln.received_qty -= r.qty; else ln.damaged_qty -= r.qty; if (ln.not_on_asn && !ln.received_qty && !ln.damaged_qty) S.asnLines = S.asnLines.filter(y => y !== ln); }
+      S.stockMoves.push(mv({kind: "adjust", client_id: x.client_id, item_id: r.item_id, inventory_id: r.inventory_id, from_loc: lc, lpn: r.lpn, batch: r.batch, expiry_date: r.expiry_date, qty: -r.qty, qty_before: r.qty, qty_after: 0, reason: "Receipt undone", note: String(a.p_note || "").trim(), ref: x.asn_no}, me));
+      return ok(null);
+    }
+    case "asn_set_status": {
+      const x = S.asns.find(y => y.id === a.p_asn); if (!x) return E("ASN not found");
+      const any = S.receipts.some(r => r.asn_id === x.id && !r.cancelled), note = String(a.p_note || "").trim(), s = a.p_status;
+      if (s === "received") { if (!["open", "receiving"].includes(x.status)) return E(`ASN ${x.asn_no} is ${x.status}`); if (!any) return E("Nothing has been received on this ASN yet"); Object.assign(x, {status: "received", received_at: tick(), updated_at: tick()}); return ok(null); }
+      if (!staff) return E("Only supervisors can do this");
+      if (s === "closed") { if (!["open", "receiving", "received"].includes(x.status)) return E(`ASN ${x.asn_no} is ${x.status}`); if (!any) return E("Nothing has been received. Cancel the ASN instead.");
+        if (S.asnLines.some(l => l.asn_id === x.id && (l.received_qty !== l.expected_qty || l.damaged_qty > 0)) && !note) return E("The ASN has short, extra or damaged lines. Enter a note to close it.");
+        Object.assign(x, {status: "closed", received_at: x.received_at || tick(), closed_at: tick(), closed_by: me.id, close_note: note, updated_at: tick()}); return ok(null); }
+      if (s === "cancelled") { if (any) return E("Goods have been received on this ASN, so it can't be cancelled. Undo the receipts first or close it."); if (!note) return E("Enter a reason");
+        Object.assign(x, {status: "cancelled", closed_at: tick(), closed_by: me.id, close_note: note, updated_at: tick()}); return ok(null); }
+      if (s === "receiving") { if (!["received", "closed"].includes(x.status)) return E(`ASN ${x.asn_no} is ${x.status}`); Object.assign(x, {status: "receiving", closed_at: null, closed_by: null, close_note: [x.close_note, "Reopened: " + note].filter(Boolean).join(" | "), updated_at: tick()}); return ok(null); }
+      return E("Unknown status " + s);
+    }
+    case "asn_find": {
+      const v = up(a.p_code), refs = new Set([v]); S.gateVisits.filter(g => g.pass_code === v).forEach(g => (g.refs || []).forEach(r => refs.add(up(r))));
+      return ok(S.asns.filter(x => ["open", "receiving", "received"].includes(x.status) && (refs.has(x.asn_no) || refs.has(up(x.ext_ref)))).map(x => x.id));
+    }
+    case "putaway_suggest": {
+      const v = S.inventory.find(i => i.id === a.p_inv); if (!v) return E("This pallet is no longer there");
+      const occupied = new Set(S.inventory.filter(i => i.qty > 0).map(i => i.location_id));
+      const withItem = new Set(S.inventory.filter(i => i.item_id === v.item_id && i.qty > 0).map(i => i.location_id));
+      const zones = new Set(S.locations.filter(l => withItem.has(l.id) && l.zone && l.kind === "storage").map(l => l.zone));
+      const same = S.locations.filter(l => l.active && !l.hold && ["storage", "pick"].includes(l.kind) && l.mixed_allowed && l.id !== v.location_id && withItem.has(l.id)).sort((p1, p2) => p1.code.localeCompare(p2.code)).slice(0, 3).map(l => ({code: l.code, why: "Has this item", zone: l.zone}));
+      const empty = S.locations.filter(l => l.active && !l.hold && l.kind === "storage" && l.id !== v.location_id && !occupied.has(l.id)).sort((p1, p2) => (zones.has(p2.zone) - zones.has(p1.zone)) || p1.code.localeCompare(p2.code)).slice(0, 3).map(l => ({code: l.code, why: zones.has(l.zone) ? "Empty, same zone" : "Empty", zone: l.zone}));
+      return ok(same.concat(empty));
+    }
+  }
+  return E("Unknown function " + name);
+}
+Object.assign(views, asnViews);
+if (!S.asns) seedAsn(S);
 /* ---------- query builder (the small part of supabase-js the apps use) ---------- */
 const reEsc = c => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const like = p => { const t = String(p); let out = ""; for (let i = 0; i < t.length; i++) { const c = t[i]; if (c === "\\" && i + 1 < t.length) out += reEsc(t[++i]); else if (c === "%") out += ".*"; else if (c === "_") out += "."; else out += reEsc(c); } return new RegExp("^" + out + "$", "i"); };
@@ -735,6 +877,7 @@ function rpc(name, a, me) {
       if (name.startsWith("gate_")) return gateRpc(name, a, me, staff);
       if (name.startsWith("checklist_")) return ckRpc(name, a, me, staff);
       if (name.startsWith("stock_")) return stockRpc(name, a, me, staff);
+      if (name.startsWith("asn_") || name === "putaway_suggest") return asnRpc(name, a, me, staff);
   }
   return E("Unknown function " + name);
 }

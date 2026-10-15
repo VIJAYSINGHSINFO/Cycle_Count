@@ -9,7 +9,7 @@ const ls = {get: k => { try { return localStorage.getItem(k); } catch { return n
 const addStyle = css => { const s = document.createElement("style"); s.textContent = css; document.head.appendChild(s); };
 const runScript = code => { const s = document.createElement("script"); s.textContent = code; document.body.appendChild(s); };
 const loadScript = src => new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = rej; setTimeout(res, 12000); document.head.appendChild(s); });
-const COLLS = ["cc_users", "cc_sessions", "cc_recon", "cc_lines", "cc_events", "cc_qc_orders", "cc_qc_lines", "cc_qc_events", "cc_photos", "cc_org", "cc_sites", "cc_docks", "cc_gate_visits", "cc_gate_events", "cc_ck_templates", "cc_ck_runs", "cc_clients", "cc_simports", "cc_items", "cc_locs", "cc_inv", "cc_smoves"];
+const COLLS = ["cc_users", "cc_sessions", "cc_recon", "cc_lines", "cc_events", "cc_qc_orders", "cc_qc_lines", "cc_qc_events", "cc_photos", "cc_org", "cc_sites", "cc_docks", "cc_gate_visits", "cc_gate_events", "cc_ck_templates", "cc_ck_runs", "cc_clients", "cc_simports", "cc_items", "cc_locs", "cc_inv", "cc_smoves", "cc_asns", "cc_asn_lines", "cc_receipts"];
 // Stock is large: items, locations and stock lines are packed many to a document (one field per row).
 const PACKED = [["cc_items", "items"], ["cc_locs", "locations"], ["cc_inv", "inventory"]];
 const bucket = id => { let h = 0; for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return "b" + (h % 32); };
@@ -75,6 +75,8 @@ async function start(app) {
     if (remote.cc_clients.length) {
       store.clients = []; store.stockImports = []; store.stockImportRows = []; store.stockMoves = []; store.stockVer = 1;
       put(store.clients, "cc_clients"); put(store.stockImports, "cc_simports");
+      store.lpnSeq = 1000 + Math.floor(Math.random() * 1e5);
+      if (remote.cc_asns.length) { store.asns = []; store.asnLines = []; store.receipts = []; put(store.asns, "cc_asns"); put(store.asnLines, "cc_asn_lines"); put(store.receipts, "cc_receipts"); }
       for (const [coll, key] of PACKED) { store[key] = []; remote[coll].forEach(d => { known.add(`${coll}/${d.id}`); Object.entries(d.data).forEach(([f, v]) => { if (f[0] !== "r" || v == null) return; store[key].push(v); sent.set(`${coll}/${d.id}#${f}`, canon(v)); }); }); }
       remote.cc_smoves.forEach(d => { known.add(`cc_smoves/${d.id}`); Object.entries(d.data).forEach(([f, v]) => { if (f[0] !== "e" || v == null) return; store.stockMoves.push(v); sent.set(`cc_smoves/${d.id}#${f}`, canon(v)); }); });
     }
@@ -111,7 +113,7 @@ function syncLabel(t, bad) { const e = $("#tl-sync"); if (e) { e.textContent = t
 function startSync(S, sent, known, linesSent) {
   let busy = false, evCount = 0, lastLen = -1;
   const lineDoc = l => `cc_lines/${l.session_id}__${l.id >= 1e9 ? "x" + Math.floor((l.id - 1e9) / 250) : "c" + Math.floor(l.id / 250)}`;
-  const items = () => [["cc_users", S.users], ["cc_sessions", S.sessions], ["cc_recon", S.reconciliations], ["cc_qc_orders", S.qcOrders || []], ["cc_qc_lines", S.qcLines || []], ["cc_photos", S.photoDocs || (S.photoDocs = [])], ["cc_org", S.org || []], ["cc_sites", S.sites || []], ["cc_docks", S.docks || []], ["cc_gate_visits", S.gateVisits || []], ["cc_gate_events", S.gateEvents || []], ["cc_ck_templates", S.ckTemplates || []], ["cc_ck_runs", S.ckRuns || []], ["cc_clients", S.clients || []], ["cc_simports", S.stockImports || []]];
+  const items = () => [["cc_users", S.users], ["cc_sessions", S.sessions], ["cc_recon", S.reconciliations], ["cc_qc_orders", S.qcOrders || []], ["cc_qc_lines", S.qcLines || []], ["cc_photos", S.photoDocs || (S.photoDocs = [])], ["cc_org", S.org || []], ["cc_sites", S.sites || []], ["cc_docks", S.docks || []], ["cc_gate_visits", S.gateVisits || []], ["cc_gate_events", S.gateEvents || []], ["cc_ck_templates", S.ckTemplates || []], ["cc_ck_runs", S.ckRuns || []], ["cc_clients", S.clients || []], ["cc_simports", S.stockImports || []], ["cc_asns", S.asns || []], ["cc_asn_lines", S.asnLines || []], ["cc_receipts", S.receipts || []]];
   let qcCount = 0, smCount = 0, stockVerSent = -1;
   async function out() {
     if (busy) return; busy = true;
@@ -174,7 +176,7 @@ function startSync(S, sent, known, linesSent) {
   // changes from the other device
   const replaceIn = (arr, id, remote) => { const i = arr.findIndex(x => x.id === id); if (remote == null) { if (i >= 0) arr.splice(i, 1); } else if (i >= 0) { const o = arr[i]; Object.keys(o).forEach(k => delete o[k]); Object.assign(o, remote); } else arr.push(remote); };
   const bump = t => { const v = Date.parse(t || ""); if (v > S.clock) S.clock = v; };
-  for (const [coll, get] of [["cc_users", () => S.users], ["cc_sessions", () => S.sessions], ["cc_recon", () => S.reconciliations], ["cc_qc_orders", () => S.qcOrders], ["cc_qc_lines", () => S.qcLines], ["cc_photos", () => S.photoDocs || (S.photoDocs = [])], ["cc_org", () => S.org], ["cc_sites", () => S.sites], ["cc_docks", () => S.docks], ["cc_gate_visits", () => S.gateVisits], ["cc_gate_events", () => S.gateEvents], ["cc_ck_templates", () => S.ckTemplates], ["cc_ck_runs", () => S.ckRuns], ["cc_clients", () => S.clients || (S.clients = [])], ["cc_simports", () => S.stockImports || (S.stockImports = [])]]) {
+  for (const [coll, get] of [["cc_users", () => S.users], ["cc_sessions", () => S.sessions], ["cc_recon", () => S.reconciliations], ["cc_qc_orders", () => S.qcOrders], ["cc_qc_lines", () => S.qcLines], ["cc_photos", () => S.photoDocs || (S.photoDocs = [])], ["cc_org", () => S.org], ["cc_sites", () => S.sites], ["cc_docks", () => S.docks], ["cc_gate_visits", () => S.gateVisits], ["cc_gate_events", () => S.gateEvents], ["cc_ck_templates", () => S.ckTemplates], ["cc_ck_runs", () => S.ckRuns], ["cc_clients", () => S.clients || (S.clients = [])], ["cc_simports", () => S.stockImports || (S.stockImports = [])], ["cc_asns", () => S.asns || (S.asns = [])], ["cc_asn_lines", () => S.asnLines || (S.asnLines = [])], ["cc_receipts", () => S.receipts || (S.receipts = [])]]) {
     db.collection(coll).onSnapshot(snap => {
       const ids = new Set();
       snap.docs.forEach(d => { const p = `${coll}/${d.id}`; ids.add(p); known.add(p); const r = clone(d.data()), rj = canon(r); if (rj === sent.get(p)) return;

@@ -153,6 +153,24 @@ The APK from Part 4 is a *debug* build. It's fine for testing and for installing
    - **Start at label position** lets you reuse a partly used label sheet.
    - If a code can't be encoded in the chosen barcode type (for example letters in EAN-13), or the bars would be too thin to scan, the console lists it before printing.
 
+## Version 8: inbound (ASNs, receiving, putaway)
+
+**Do this once:** run the new `supabase/schema.sql` in the Supabase SQL Editor (clear, paste the whole file, Run, confirm the warning). Existing data is kept.
+
+**Console > Inbound**
+- **Upload ASNs:** Excel or CSV, one row per line: ASN number, SKU, expected quantity (plus client, PO, supplier, expected date, batch, expiry if you have them). One file can hold many ASNs. Download the template from the upload page. SKUs not in the item master are listed; tick "create them" to add them. Uploading an ASN again replaces it if nothing has been received yet.
+- **Each ASN:** expected vs received good, damaged, short and extra per line; every pallet received (who, when, LPN, batch, expiry, flags) and where it is now. **Undo** a wrong receipt while the pallet hasn't been moved. **Close** the ASN when checked (a note is required if anything is short, extra or damaged), **Print GRN** (goods received note with signature lines), **Export** to Excel. Cancel an ASN that won't arrive; reopen a closed one if needed.
+
+**Phone > Inbound tab > Receive**
+1. Scan the **driver's gate pass** (finds the ASNs from its ASN / PO numbers), or type the ASN or PO, or tap it in the list.
+2. Scan the **receiving location** once (a staging or dock location; it is remembered).
+3. Scan each **product** (barcode or SKU). Enter cases or units, batch / mfg / expiry as the client requires, Good or Damaged (with the damage), and scan the pallet label, or leave it empty and Stowra creates one (SW…; write it on the pallet or print it from Barcode labels).
+4. **Unloading finished** when done. A supervisor closes it on the console.
+
+**Rules on receipt:** the client's required fields; expiry after mfg date; more than the ASN or a product not on the ASN needs the operator to confirm and is flagged; products not in the item master are refused; damaged goods, expired goods and goods below the client's minimum shelf life (Clients page) are received **on hold**; a pallet label can't be used twice.
+
+**Phone > Inbound tab > Put away:** pallets waiting in staging and dock locations are listed. Scan a pallet label: Stowra suggests locations that already hold the item, then empty storage locations in the same zone. Scan the location you put it in to confirm (any location is accepted).
+
 ## Version 7: stock (clients, items, locations, pallets)
 
 **Do this once:** run the new `supabase/schema.sql` in the Supabase SQL Editor (clear, paste the whole file, Run, confirm the warning). Existing data is kept.

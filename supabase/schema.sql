@@ -1794,6 +1794,8 @@ begin
 end $$;
 
 -- Stock with everything needed to show it (client, item, location, expiry state, available quantity)
+-- item_stock_v is built on inventory_v, so it is dropped first (and recreated below)
+drop view if exists public.item_stock_v;
 drop view if exists public.inventory_v;
 create view public.inventory_v with (security_invoker = true) as
 select i.*, c.code as client_code, c.name as client_name, c.batch_label, c.ref2_label, c.near_expiry_days,
@@ -1982,3 +1984,344 @@ returns jsonb language sql stable security definer set search_path = public as $
 $$;
 revoke all on function public.stock_summary(text) from public, anon;
 grant execute on function public.stock_summary(text) to authenticated;
+
+-- =====================================================================
+-- Version 8: inbound. ASNs (advance shipping notices), receiving on the phone, putaway.
+--   Received pallets go into Stowra's stock in the receiving location, then are put away.
+-- =====================================================================
+create sequence if not exists public.lpn_seq;
+
+create table if not exists public.asns (
+  id             uuid primary key default gen_random_uuid(),
+  client_id      uuid not null references public.clients (id),
+  asn_no         text not null,                  -- stored in capitals
+  ext_ref        text not null default '',       -- client PO / reference
+  supplier       text not null default '',
+  expected_date  date,
+  status         text not null default 'open' check (status in ('open', 'receiving', 'received', 'closed', 'cancelled')),
+  notes          text not null default '',
+  source_file    text not null default '',
+  created_by     uuid references public.profiles (id) default auth.uid(),
+  created_at     timestamptz not null default now(),
+  started_at     timestamptz,
+  received_at    timestamptz,
+  closed_at      timestamptz,
+  closed_by      uuid references public.profiles (id),
+  close_note     text not null default '',
+  updated_at     timestamptz not null default now(),
+  unique (client_id, asn_no)
+);
+create index if not exists asns_status_idx on public.asns (status);
+
+create table if not exists public.asn_lines (
+  id             bigserial primary key,
+  asn_id         uuid not null references public.asns (id) on delete cascade,
+  line_no        integer not null,
+  item_id        bigint not null references public.items (id),
+  expected_qty   numeric not null default 0 check (expected_qty >= 0),
+  received_qty   numeric not null default 0 check (received_qty >= 0),   -- good
+  damaged_qty    numeric not null default 0 check (damaged_qty >= 0),
+  batch          text not null default '',      -- expected batch, if the ASN gives one
+  expiry_date    date,
+  not_on_asn     boolean not null default false,  -- added during receiving
+  updated_at     timestamptz not null default now()
+);
+create index if not exists asn_lines_asn_idx on public.asn_lines (asn_id);
+
+create table if not exists public.receipts (
+  id             bigserial primary key,
+  asn_id         uuid not null references public.asns (id) on delete cascade,
+  asn_line_id    bigint references public.asn_lines (id) on delete set null,
+  item_id        bigint not null references public.items (id),
+  inventory_id   bigint,
+  location_id    bigint references public.locations (id),
+  lpn            text not null default '',
+  batch          text not null default '',
+  mfg_date       date,
+  expiry_date    date,
+  qty            numeric not null check (qty > 0),
+  condition      text not null default 'good' check (condition in ('good', 'damaged')),
+  damage_reason  text not null default '',
+  flags          text[] not null default '{}',  -- excess, not_on_asn, short_life, expired
+  cancelled      boolean not null default false,
+  cancelled_by   uuid references public.profiles (id),
+  cancelled_at   timestamptz,
+  user_id        uuid references public.profiles (id) default auth.uid(),
+  device         text,
+  client_uuid    uuid unique,
+  created_at     timestamptz not null default now()
+);
+create index if not exists receipts_asn_idx on public.receipts (asn_id);
+
+alter table public.asns enable row level security;
+alter table public.asn_lines enable row level security;
+alter table public.receipts enable row level security;
+drop policy if exists asns_read on public.asns;
+create policy asns_read on public.asns for select to authenticated using (public.my_role() is not null);
+drop policy if exists asns_write on public.asns;
+create policy asns_write on public.asns for update to authenticated using (public.is_staff()) with check (public.is_staff());
+drop policy if exists asn_lines_read on public.asn_lines;
+create policy asn_lines_read on public.asn_lines for select to authenticated using (public.my_role() is not null);
+drop policy if exists receipts_read on public.receipts;
+create policy receipts_read on public.receipts for select to authenticated using (public.my_role() is not null);
+grant select on public.asns, public.asn_lines, public.receipts to authenticated;
+grant update (notes, expected_date, supplier, ext_ref, updated_at) on public.asns to authenticated;
+
+-- Load ASNs from a file. p: { file, create_items, rows: [{client, client_name, asn_no, ext_ref, supplier, expected_date, sku, descr, qty, batch, expiry_date}] }
+-- An ASN that already exists is replaced if nothing has been received on it yet.
+create or replace function public.asn_import(p jsonb)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare r record; v_asn public.asns; v_item bigint; v_new int := 0; v_repl int := 0; v_lines int := 0; v_items int := 0; v_line int; v_create boolean := coalesce((p ->> 'create_items')::boolean, false);
+begin
+  if not public.is_staff() then raise exception 'Only supervisors can load ASNs' using errcode = '42501'; end if;
+  create temp table _a on commit drop as
+  select ord, upper(trim(coalesce(x ->> 'client', ''))) as client, trim(coalesce(x ->> 'client_name', '')) as client_name, upper(trim(coalesce(x ->> 'asn_no', ''))) as asn_no,
+         trim(coalesce(x ->> 'ext_ref', '')) as ext_ref, trim(coalesce(x ->> 'supplier', '')) as supplier, nullif(x ->> 'expected_date', '')::date as expected_date,
+         upper(trim(coalesce(x ->> 'sku', ''))) as sku, trim(coalesce(x ->> 'descr', '')) as descr, coalesce(nullif(x ->> 'qty', '')::numeric, 0) as qty,
+         trim(coalesce(x ->> 'batch', '')) as batch, nullif(x ->> 'expiry_date', '')::date as expiry_date
+    from jsonb_array_elements(coalesce(p -> 'rows', '[]'::jsonb)) with ordinality as t(x, ord);
+  if not exists (select 1 from _a) then raise exception 'The file has no ASN lines'; end if;
+  if exists (select 1 from _a where client = '' or asn_no = '' or sku = '') then raise exception 'Every line needs a client, an ASN number and a SKU'; end if;
+  if exists (select 1 from _a where qty <= 0) then raise exception 'Every line needs a quantity above 0'; end if;
+  insert into clients (code, name) select client, max(client_name) from _a group by client on conflict (code) do nothing;
+  if v_create then
+    insert into items (client_id, sku, description)
+    select distinct on (c.id, a.sku) c.id, a.sku, a.descr from _a a join clients c on c.code = a.client
+     where not exists (select 1 from items i where i.client_id = c.id and i.sku = a.sku)
+     order by c.id, a.sku, a.ord;
+    get diagnostics v_items = row_count;
+  elsif exists (select 1 from _a a join clients c on c.code = a.client where not exists (select 1 from items i where i.client_id = c.id and i.sku = a.sku)) then
+    raise exception 'SKU % (%) isn''t in the item master. Add it first, or tick "create missing items".',
+      (select a.sku from _a a join clients c on c.code = a.client where not exists (select 1 from items i where i.client_id = c.id and i.sku = a.sku) limit 1),
+      (select a.client from _a a join clients c on c.code = a.client where not exists (select 1 from items i where i.client_id = c.id and i.sku = a.sku) limit 1);
+  end if;
+  for r in select a.client, a.asn_no, c.id as client_id, max(a.ext_ref) as ext_ref, max(a.supplier) as supplier, max(a.expected_date) as expected_date
+             from _a a join clients c on c.code = a.client group by a.client, a.asn_no, c.id loop
+    select * into v_asn from asns where client_id = r.client_id and asn_no = r.asn_no for update;
+    if found then
+      if v_asn.status not in ('open', 'cancelled') or exists (select 1 from receipts where asn_id = v_asn.id and not cancelled) then
+        raise exception 'ASN % (%) is already being received, so it can''t be replaced', r.asn_no, r.client;
+      end if;
+      delete from asn_lines where asn_id = v_asn.id;
+      update asns set ext_ref = r.ext_ref, supplier = r.supplier, expected_date = r.expected_date, status = 'open', source_file = coalesce(p ->> 'file', ''), updated_at = now() where id = v_asn.id;
+      v_repl := v_repl + 1;
+    else
+      insert into asns (client_id, asn_no, ext_ref, supplier, expected_date, source_file) values (r.client_id, r.asn_no, r.ext_ref, r.supplier, r.expected_date, coalesce(p ->> 'file', '')) returning * into v_asn;
+      v_new := v_new + 1;
+    end if;
+    insert into asn_lines (asn_id, line_no, item_id, expected_qty, batch, expiry_date)
+    select v_asn.id, row_number() over (order by min(a.ord)), i.id, sum(a.qty), a.batch, a.expiry_date
+      from _a a join items i on i.client_id = r.client_id and i.sku = a.sku
+     where a.client = r.client and a.asn_no = r.asn_no
+     group by i.id, a.batch, a.expiry_date;
+    get diagnostics v_line = row_count; v_lines := v_lines + v_line;
+  end loop;
+  return jsonb_build_object('new', v_new, 'replaced', v_repl, 'lines', v_lines, 'new_items', v_items);
+end $$;
+
+-- Receive goods against an ASN (phone). p: { asn_id, code (SKU or barcode), qty, condition, damage_reason, batch, mfg_date, expiry_date, lpn, location,
+--   confirm (true once the operator accepted an "extra" or "not on ASN" warning), device, client_uuid }
+create or replace function public.asn_receive(p jsonb)
+returns jsonb language plpgsql security definer set search_path = public as $$
+declare a public.asns; c public.clients; it public.items; ln public.asn_lines; l public.locations; v_code text := upper(trim(coalesce(p ->> 'code', '')));
+  v_qty numeric := (p ->> 'qty')::numeric; v_cond text := coalesce(nullif(p ->> 'condition', ''), 'good'); v_batch text := trim(coalesce(p ->> 'batch', ''));
+  v_mfg date := nullif(p ->> 'mfg_date', '')::date; v_exp date := nullif(p ->> 'expiry_date', '')::date; v_lpn text := upper(trim(coalesce(p ->> 'lpn', '')));
+  v_confirm boolean := coalesce((p ->> 'confirm')::boolean, false); v_flags text[] := '{}'; v_status text := 'ok'; v_reason text := ''; v_life numeric; v_inv public.inventory; v_rec public.receipts; v_done numeric;
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  if nullif(p ->> 'client_uuid', '') is not null and exists (select 1 from receipts where client_uuid = (p ->> 'client_uuid')::uuid) then
+    return (select jsonb_build_object('ok', true, 'repeat', true, 'receipt_id', id, 'lpn', lpn) from receipts where client_uuid = (p ->> 'client_uuid')::uuid);
+  end if;
+  select * into a from asns where id = (p ->> 'asn_id')::uuid for update;
+  if not found then raise exception 'ASN not found'; end if;
+  if a.status in ('closed', 'cancelled') then raise exception 'ASN % is %', a.asn_no, a.status; end if;
+  select * into c from clients where id = a.client_id;
+  select * into it from items where client_id = c.id and (sku = v_code or (barcode <> '' and upper(barcode) = v_code)) order by (sku = v_code) desc limit 1;
+  if not found then raise exception 'NOTITEM:% isn''t a % item. Ask a supervisor to add it to the item master.', v_code, c.code; end if;
+  if v_qty is null or v_qty <= 0 then raise exception 'Enter the quantity received'; end if;
+  if v_cond not in ('good', 'damaged') then raise exception 'Unknown condition'; end if;
+  if v_cond = 'damaged' and nullif(trim(coalesce(p ->> 'damage_reason', '')), '') is null then raise exception 'Choose the damage reason'; end if;
+  -- client rules
+  if c.track_batch = 'required' and v_batch = '' then raise exception '% is required for %', c.batch_label, c.code; end if;
+  if c.track_expiry = 'required' and v_exp is null then raise exception 'The expiry date is required for %', c.code; end if;
+  if c.track_mfg = 'required' and v_mfg is null then raise exception 'The manufacturing date is required for %', c.code; end if;
+  if v_mfg is not null and v_mfg > public.uae_today() then raise exception 'The manufacturing date is in the future'; end if;
+  if v_mfg is not null and v_exp is not null and v_exp <= v_mfg then raise exception 'The expiry date must be after the manufacturing date'; end if;
+  select * into l from locations where code = upper(trim(coalesce(p ->> 'location', '')));
+  if not found then raise exception 'Scan the receiving location first (% doesn''t exist)', upper(trim(coalesce(p ->> 'location', ''))); end if;
+  if not l.active then raise exception 'Location % is turned off', l.code; end if;
+  if v_lpn <> '' and exists (select 1 from inventory where upper(lpn) = v_lpn) then raise exception 'Pallet label % is already used. Scan a new label or leave it empty to create one.', v_lpn; end if;
+  -- which ASN line
+  select * into ln from asn_lines where asn_id = a.id and item_id = it.id
+   order by (received_qty + damaged_qty < expected_qty) desc, (batch = v_batch) desc, line_no limit 1 for update;
+  if not found then
+    if not v_confirm then raise exception 'CONFIRM:% (%) is not on ASN %. Receive it anyway?', it.sku, it.description, a.asn_no; end if;
+    insert into asn_lines (asn_id, line_no, item_id, expected_qty, not_on_asn)
+    values (a.id, coalesce((select max(line_no) from asn_lines where asn_id = a.id), 0) + 1, it.id, 0, true) returning * into ln;
+    v_flags := v_flags || 'not_on_asn'::text;
+  else
+    select coalesce(sum(received_qty + damaged_qty), 0) into v_done from asn_lines where asn_id = a.id and item_id = it.id;
+    if v_done + v_qty > (select sum(expected_qty) from asn_lines where asn_id = a.id and item_id = it.id) then
+      if not v_confirm then raise exception 'CONFIRM:That makes % of %, but the ASN says %. Receive % extra?', v_done + v_qty, it.sku,
+        (select sum(expected_qty) from asn_lines where asn_id = a.id and item_id = it.id), v_done + v_qty - greatest((select sum(expected_qty) from asn_lines where asn_id = a.id and item_id = it.id), v_done); end if;
+      v_flags := v_flags || 'excess'::text;
+    end if;
+  end if;
+  -- condition and shelf life decide whether the pallet is available
+  if v_cond = 'damaged' then v_status := 'hold'; v_reason := 'Damaged on receipt: ' || trim(p ->> 'damage_reason'); end if;
+  if v_exp is not null and v_exp < public.uae_today() then v_flags := v_flags || 'expired'::text; v_status := 'hold'; v_reason := coalesce(nullif(v_reason, '') || '; ', '') || 'Expired on arrival'; end if;
+  if v_exp is not null and c.min_life_receive_pct > 0 and v_status = 'ok' then
+    v_life := case when it.shelf_life_days > 0 then (v_exp - public.uae_today())::numeric / it.shelf_life_days * 100
+                   when v_mfg is not null and v_exp > v_mfg then (v_exp - public.uae_today())::numeric / (v_exp - v_mfg) * 100 end;
+    if v_life is not null and v_life < c.min_life_receive_pct then
+      v_flags := v_flags || 'short_life'::text; v_status := 'hold';
+      v_reason := 'Short shelf life on receipt: ' || round(v_life) || '% left, ' || c.code || ' needs ' || c.min_life_receive_pct || '%';
+    end if;
+  end if;
+  if l.hold and v_status = 'ok' then v_status := 'hold'; v_reason := 'In ' || l.code; end if;
+  if v_lpn = '' then v_lpn := 'SW' || lpad(nextval('public.lpn_seq')::text, 8, '0'); end if;
+  insert into inventory (client_id, item_id, location_id, lpn, batch, mfg_date, expiry_date, received_at, asn, ext_ref, qty, status, hold_reason, updated_by)
+  values (c.id, it.id, l.id, v_lpn, v_batch, v_mfg, v_exp, now(), a.asn_no, a.ext_ref, v_qty, v_status, v_reason, auth.uid()) returning * into v_inv;
+  update asn_lines set received_qty = received_qty + case when v_cond = 'good' then v_qty else 0 end, damaged_qty = damaged_qty + case when v_cond = 'damaged' then v_qty else 0 end, updated_at = now() where id = ln.id;
+  insert into receipts (asn_id, asn_line_id, item_id, inventory_id, location_id, lpn, batch, mfg_date, expiry_date, qty, condition, damage_reason, flags, device, client_uuid)
+  values (a.id, ln.id, it.id, v_inv.id, l.id, v_lpn, v_batch, v_mfg, v_exp, v_qty, v_cond, trim(coalesce(p ->> 'damage_reason', '')), v_flags, p ->> 'device', nullif(p ->> 'client_uuid', '')::uuid)
+  returning * into v_rec;
+  update asns set status = case when status = 'open' then 'receiving' else status end, started_at = coalesce(started_at, now()), updated_at = now() where id = a.id;
+  insert into stock_moves (kind, client_id, item_id, inventory_id, to_loc, lpn, batch, expiry_date, qty, qty_before, qty_after, reason, note, ref, device, user_id)
+  values ('receive', c.id, it.id, v_inv.id, l.code, v_lpn, v_batch, v_exp, v_qty, 0, v_qty, case when v_cond = 'damaged' then 'Damaged on receipt' else 'Received' end,
+          array_to_string(v_flags, ', '), a.asn_no, p ->> 'device', auth.uid());
+  return jsonb_build_object('ok', true, 'receipt_id', v_rec.id, 'lpn', v_lpn, 'status', v_status, 'hold_reason', v_reason, 'flags', to_jsonb(v_flags), 'sku', it.sku);
+end $$;
+
+-- Undo a receipt (a wrong scan). Only while the pallet is untouched: same place, same quantity, nothing allocated.
+-- The person who received it can undo within 2 hours; supervisors at any time.
+create or replace function public.asn_undo_receipt(p_receipt bigint, p_note text default '')
+returns void language plpgsql security definer set search_path = public as $$
+declare r public.receipts; a public.asns; v public.inventory; lc text;
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  select * into r from receipts where id = p_receipt for update;
+  if not found or r.cancelled then raise exception 'This receipt is already undone'; end if;
+  if not public.is_staff() and (r.user_id <> auth.uid() or r.created_at < now() - interval '2 hours') then raise exception 'Ask a supervisor to undo this receipt'; end if;
+  select * into a from asns where id = r.asn_id;
+  if a.status in ('closed', 'cancelled') then raise exception 'ASN % is closed', a.asn_no; end if;
+  select * into v from inventory where id = r.inventory_id for update;
+  if not found or v.qty <> r.qty or v.location_id <> r.location_id or v.allocated_qty + v.picked_qty > 0 then
+    raise exception 'The pallet has already been moved or changed, so the receipt can''t be undone. Adjust the stock instead.';
+  end if;
+  select code into lc from locations where id = v.location_id;
+  delete from inventory where id = v.id;
+  update receipts set cancelled = true, cancelled_by = auth.uid(), cancelled_at = now() where id = r.id;
+  update asn_lines set received_qty = received_qty - case when r.condition = 'good' then r.qty else 0 end, damaged_qty = damaged_qty - case when r.condition = 'damaged' then r.qty else 0 end, updated_at = now() where id = r.asn_line_id;
+  delete from asn_lines l where l.id = r.asn_line_id and l.not_on_asn and l.received_qty = 0 and l.damaged_qty = 0;
+  insert into stock_moves (kind, client_id, item_id, inventory_id, from_loc, lpn, batch, expiry_date, qty, qty_before, qty_after, reason, note, ref, user_id)
+  values ('adjust', a.client_id, r.item_id, r.inventory_id, lc, r.lpn, r.batch, r.expiry_date, -r.qty, r.qty, 0, 'Receipt undone', trim(coalesce(p_note, '')), a.asn_no, auth.uid());
+end $$;
+
+-- Change an ASN's status. Operators: 'received' (unloading finished). Supervisors: 'closed' (note needed if short, extra or damaged),
+-- 'cancelled' (only if nothing was received), 'receiving' (reopen).
+create or replace function public.asn_set_status(p_asn uuid, p_status text, p_note text default '')
+returns void language plpgsql security definer set search_path = public as $$
+declare a public.asns; v_var boolean;
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  select * into a from asns where id = p_asn for update;
+  if not found then raise exception 'ASN not found'; end if;
+  if p_status = 'received' then
+    if a.status not in ('open', 'receiving') then raise exception 'ASN % is %', a.asn_no, a.status; end if;
+    if not exists (select 1 from receipts where asn_id = a.id and not cancelled) then raise exception 'Nothing has been received on this ASN yet'; end if;
+    update asns set status = 'received', received_at = now(), updated_at = now() where id = a.id;
+  elsif not public.is_staff() then raise exception 'Only supervisors can do this' using errcode = '42501';
+  elsif p_status = 'closed' then
+    if a.status not in ('open', 'receiving', 'received') then raise exception 'ASN % is %', a.asn_no, a.status; end if;
+    if not exists (select 1 from receipts where asn_id = a.id and not cancelled) then raise exception 'Nothing has been received. Cancel the ASN instead.'; end if;
+    select bool_or(received_qty <> expected_qty or damaged_qty > 0) into v_var from asn_lines where asn_id = a.id;
+    if coalesce(v_var, false) and nullif(trim(coalesce(p_note, '')), '') is null then raise exception 'The ASN has short, extra or damaged lines. Enter a note to close it.'; end if;
+    update asns set status = 'closed', received_at = coalesce(received_at, now()), closed_at = now(), closed_by = auth.uid(), close_note = trim(coalesce(p_note, '')), updated_at = now() where id = a.id;
+  elsif p_status = 'cancelled' then
+    if exists (select 1 from receipts where asn_id = a.id and not cancelled) then raise exception 'Goods have been received on this ASN, so it can''t be cancelled. Undo the receipts first or close it.'; end if;
+    if nullif(trim(coalesce(p_note, '')), '') is null then raise exception 'Enter a reason'; end if;
+    update asns set status = 'cancelled', closed_at = now(), closed_by = auth.uid(), close_note = trim(p_note), updated_at = now() where id = a.id;
+  elsif p_status = 'receiving' then
+    if a.status not in ('received', 'closed') then raise exception 'ASN % is %', a.asn_no, a.status; end if;
+    update asns set status = 'receiving', closed_at = null, closed_by = null, updated_at = now(), close_note = concat_ws(' | ', nullif(close_note, ''), 'Reopened: ' || trim(coalesce(p_note, ''))) where id = a.id;
+  else raise exception 'Unknown status %', p_status;
+  end if;
+end $$;
+
+-- Find ASNs by ASN number, client reference, or the driver's gate pass (its ASN / PO numbers)
+create or replace function public.asn_find(p_code text)
+returns setof uuid language sql stable security definer set search_path = public as $$
+  with v as (select upper(trim(coalesce(p_code, ''))) as code),
+       refs as (select upper(x) as r from gate_visits g, unnest(g.refs) x, v where g.pass_code = v.code
+                union select v.code from v)
+  select a.id from asns a where public.my_role() is not null and a.status in ('open', 'receiving', 'received')
+     and (a.asn_no in (select r from refs) or upper(a.ext_ref) in (select r from refs))
+$$;
+
+-- Where to put a pallet away: locations that already hold this item, then empty storage locations
+create or replace function public.putaway_suggest(p_inv bigint)
+returns jsonb language plpgsql stable security definer set search_path = public as $$
+declare v public.inventory; f public.locations; v_out jsonb;
+begin
+  if public.my_role() is null then raise exception 'Your user is not active' using errcode = '42501'; end if;
+  select * into v from inventory where id = p_inv;
+  if not found then raise exception 'This pallet is no longer there'; end if;
+  select * into f from locations where id = v.location_id;
+  with same_item as (
+    select l.code, 'Has this item' as why, 1 as pri, l.zone
+      from locations l where l.active and not l.hold and l.kind in ('storage', 'pick') and l.mixed_allowed and l.id <> v.location_id
+       and exists (select 1 from inventory i where i.location_id = l.id and i.item_id = v.item_id and i.qty > 0)
+     order by l.code limit 3),
+  zones as (select distinct l.zone from inventory i join locations l on l.id = i.location_id where i.item_id = v.item_id and l.zone <> '' and l.kind = 'storage'),
+  empty_loc as (
+    select l.code, case when l.zone in (select zone from zones) then 'Empty, same zone' else 'Empty' end as why, case when l.zone in (select zone from zones) then 2 else 3 end as pri, l.zone
+      from locations l where l.active and not l.hold and l.kind = 'storage' and l.id <> v.location_id
+       and not exists (select 1 from inventory i where i.location_id = l.id and i.qty > 0)
+     order by (l.zone in (select zone from zones)) desc, l.code limit 3)
+  select coalesce(jsonb_agg(jsonb_build_object('code', code, 'why', why, 'zone', zone) order by pri, code), '[]'::jsonb) into v_out
+    from (select * from same_item union all select * from empty_loc) s;
+  return v_out;
+end $$;
+
+drop view if exists public.asn_list;
+create view public.asn_list with (security_invoker = true) as
+select a.*, c.code as client_code, c.name as client_name, cb.full_name as created_by_name, cl.full_name as closed_by_name,
+       coalesce(t.lines, 0) as lines, coalesce(t.expected, 0) as expected_qty, coalesce(t.received, 0) as received_qty, coalesce(t.damaged, 0) as damaged_qty,
+       coalesce(t.short, 0) as short_qty, coalesce(t.excess, 0) as excess_qty, coalesce(t.not_on_asn, 0) as not_on_asn_lines,
+       coalesce(rc.pallets, 0) as pallets, coalesce(rc.flagged, 0) as flagged_pallets, rc.last_at
+from public.asns a
+join public.clients c on c.id = a.client_id
+left join public.profiles cb on cb.id = a.created_by
+left join public.profiles cl on cl.id = a.closed_by
+left join lateral (select count(*) as lines, sum(expected_qty) as expected, sum(received_qty) as received, sum(damaged_qty) as damaged,
+                          sum(greatest(expected_qty - received_qty - damaged_qty, 0)) as short, sum(greatest(received_qty + damaged_qty - expected_qty, 0)) as excess,
+                          count(*) filter (where not_on_asn) as not_on_asn
+                     from public.asn_lines where asn_id = a.id) t on true
+left join lateral (select count(*) as pallets, count(*) filter (where cardinality(flags) > 0 or condition = 'damaged') as flagged, max(created_at) as last_at
+                     from public.receipts where asn_id = a.id and not cancelled) rc on true;
+grant select on public.asn_list to authenticated;
+
+drop view if exists public.asn_line_v;
+create view public.asn_line_v with (security_invoker = true) as
+select l.*, it.sku, it.description, it.barcode, it.base_uom, it.case_qty, it.case_uom,
+       greatest(l.expected_qty - l.received_qty - l.damaged_qty, 0) as short_qty, greatest(l.received_qty + l.damaged_qty - l.expected_qty, 0) as excess_qty
+from public.asn_lines l join public.items it on it.id = l.item_id;
+grant select on public.asn_line_v to authenticated;
+
+drop view if exists public.receipt_v;
+create view public.receipt_v with (security_invoker = true) as
+select r.*, a.asn_no, it.sku, it.description, it.base_uom, it.case_qty, it.case_uom, l.code as location, p.full_name as user_name,
+       cl.code as current_location, cl.kind as current_location_kind, inv.status as stock_status, inv.hold_reason,
+       (inv.id is not null and cl.kind not in ('staging', 'dock')) as put_away
+from public.receipts r
+join public.asns a on a.id = r.asn_id
+join public.items it on it.id = r.item_id
+left join public.locations l on l.id = r.location_id
+left join public.profiles p on p.id = r.user_id
+left join public.inventory inv on inv.id = r.inventory_id
+left join public.locations cl on cl.id = inv.location_id;
+grant select on public.receipt_v to authenticated;
+
+revoke all on function public.asn_import(jsonb), public.asn_receive(jsonb), public.asn_undo_receipt(bigint, text), public.asn_set_status(uuid, text, text), public.asn_find(text), public.putaway_suggest(bigint) from public, anon;
+grant execute on function public.asn_import(jsonb), public.asn_receive(jsonb), public.asn_undo_receipt(bigint, text), public.asn_set_status(uuid, text, text), public.asn_find(text), public.putaway_suggest(bigint) to authenticated;
