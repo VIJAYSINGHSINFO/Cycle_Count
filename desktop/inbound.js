@@ -180,7 +180,8 @@ const guess = header => { const H = header.map(normH), m = {}; FIELDS.forEach(([
 const pad = n => String(n).padStart(2, "0");
 function toDate(v) {
   if (v == null || v === "") return "";
-  if (v instanceof Date) return isNaN(v) ? "" : `${v.getFullYear()}-${pad(v.getMonth() + 1)}-${pad(v.getDate())}`;
+  if (v instanceof Date) { if (isNaN(v)) return ""; if (v.getHours() === 23 && v.getMinutes() >= 59) v = new Date(v.getTime() + 60000);   // Excel dates can arrive a fraction before midnight
+    return `${v.getFullYear()}-${pad(v.getMonth() + 1)}-${pad(v.getDate())}`; }
   if (typeof v === "number") { if (v < 1000 || v > 80000) return ""; const d = new Date(Math.round((v - 25569) * 864e5)); return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`; }
   const s = String(v).trim(); let m;
   if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) return `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
